@@ -2,8 +2,8 @@
 
 An exact, single-threaded set of canonical k-mers. The k-mers are stored as sequence
 **pieces**, not as separate integers. Membership queries go through a **minimizer
-index**. This is the MVP described in `kmer-piece-table-mvp-plan.md`, written in
-Rust instead of C++20.
+index**. It supports streaming insertion, exact deletion and user-controlled
+defragmentation.
 
 ```rust
 use unihash::{Config, KmerTable};
@@ -46,8 +46,8 @@ println!("{}", t.stats());
 ```bash
 cargo build --release
 cargo test --profile test-opt     # full suite, overflow checks on, -O2 (about 5 s)
-tools/ci.sh                       # fmt + clippy -D warnings + tests (dev, test-opt, release) + bench smoke run
-MIRI=1 ASAN=1 tools/ci.sh         # also Miri and AddressSanitizer (needs a nightly toolchain)
+bash tools/ci.sh                  # fmt + clippy -D warnings + tests (dev, test-opt, release) + smoke runs
+MIRI=1 ASAN=1 bash tools/ci.sh    # also Miri and AddressSanitizer (needs a nightly toolchain)
 ```
 
 Replay a randomized test with one seed: `UNIHASH_SEED=1234 cargo test --profile test-opt <name>`.
@@ -63,10 +63,10 @@ being UB. `k = 32` and `ℓ = 32` are tested explicitly.
 ```bash
 cargo run --release --bin unihash-bench -- --help
 cargo run --release --bin unihash-bench -- --synthetic-repeats 4600000
-tools/fetch_data.sh [--reads]     # E. coli, chr21 [+ SRR5833294, SRR5901135] into data/
-tools/bench_real.sh               # Milestone 6 matrix on real data → bench/results/
-tools/kache_compare.sh            # same workloads on kache-hash → bench/results/kache/
-tools/churn_real.sh               # deletion/re-insertion churn × defrag policies → bench/results/churn/
+bash tools/fetch_data.sh [--reads]  # E. coli, chr21 [+ SRR5833294, SRR5901135] into data/
+bash tools/bench_real.sh            # benchmark matrix on real data → bench/results/
+bash tools/kache_compare.sh         # same workloads on kache-hash → bench/results/kache/
+bash tools/churn_real.sh            # deletion/re-insertion churn × defrag policies → bench/results/churn/
 cargo run --release --bin unihash-churn -- --synthetic-repeats 1000000 --check
 ```
 
@@ -91,7 +91,7 @@ on the same inputs and the same query k-mers, then prints a side-by-side table
 k = 31 and ℓ = 17, and its answers are checked against the hit counts from the
 unihash oracle. kache-hash must be compiled with `-fno-strict-aliasing`: at `-O3`
 without that flag, GCC miscompiles it and it finds about 1 % of the present k-mers.
-`tools/kache_compare.sh NAME ARGS…` runs a single comparison.
+`bash tools/kache_compare.sh NAME ARGS…` runs a single comparison.
 
 The bench tool reads FASTA/FASTQ, optionally gzipped, and reports:
 
@@ -153,7 +153,7 @@ Answers do not depend on the order of insertion.
 
 ### How it works
 
-* **Insertion** (plan §5.1). Insertion is streaming: the rolling k-mer, the
+* **Insertion**. Insertion is streaming: the rolling k-mer, the
   rolling ℓ-mer and a monotone deque of at most `w = k − ℓ + 1` ℓ-mer values carry
   over between chunks, and the only buffer that grows is the pending run (at most
   `max_piece_len` bases). The ℓ-mer values of a piece are computed when it is
@@ -163,11 +163,11 @@ Answers do not depend on the order of insertion.
   indexed before the scan continues, so later k-mers in the same read can see it.
   As a result each distinct k-mer lives in exactly one piece. The exception is a
   k-mer repeated *inside one pending run*, which is stored twice in the same piece.
-  This redundancy is accepted (decision 5) and reported as
+  This redundancy is accepted and reported as
   `stored_kmers − distinct`. When a run reaches `max_piece_len` it is closed
   *before* the next lookup. This keeps a repeat from being duplicated across the
   split.
-* **Minimizers** (plan §2). `m(x)` is the minimum order value over the canonical
+* **Minimizers**. `m(x)` is the minimum order value over the canonical
   ℓ-mers of `x`. The order value is a fixed bijective 64-bit mix of the canonical
   ℓ-mer (SplitMix64 finalizer), so ties are exactly those of the plain value and
   the hot minimizers can still be decoded back to their ℓ-mer. **Every** tied position is indexed. The order value depends only
@@ -212,8 +212,7 @@ Answers do not depend on the order of insertion.
     is hot too, layer 3. The streaming query does the same; it caches candidates
     only for cold minimizers.
 * **Query**. For each tag-matching entry `(pid, q)`:
-  * `Range` checks every start in `[q−(k−ℓ), q]` that fits in the piece, exactly
-    as in plan §5.2.
+  * `Range` checks every start in `[q−(k−ℓ), q]` that fits in the piece.
   * `TieOffsets` checks only `s = q − p` for `p ∈ Q(x) ∪ {(k−ℓ) − p'}`, where
     `p' ∈ Q(x)`. If `x` (or its reverse complement) occurs at `s`, then `q − s`
     is one of those offsets, so this mode is exact too. It usually needs 1–2
@@ -290,57 +289,53 @@ Answers do not depend on the order of insertion.
 ## Layout
 
 ```
-src/codec.rs        M1  2-bit codec, rolling fwd/rc k-mers, reverse complement
-src/piece_store.rs  M2/M4  packed pieces (2-bit bases + 8 B views), id reuse, base compaction
-src/minimizer.rs    M3  canonical ℓ-mer values, monotone-deque minima, tied positions
-src/index.rs        M5  flat fixed-capacity two-choice index with 8-bit tags, spilled
-                        growth, hot-minimizer drain
-src/table.rs        M6  KmerTable: insert_read / insert_chunk / end_read / contains / stats,
-                        layer-2 / layer-3 routing
-src/edit.rs             delete_read / delete (piece cuts), defrag, defrag_incremental,
-                        fragmentation, verify_index
-src/stream_query.rs     StreamingQuery: in-order queries with hit extension and candidate cache
-src/oracle.rs       M7  HashSet<u64> oracle
-src/fastx.rs        FASTA/FASTQ(.gz) reader;  src/rng.rs  SplitMix64 + synthetic genomes
-src/bin/unihash_bench.rs  M6 benchmark driver
+src/codec.rs          2-bit codec, rolling fwd/rc k-mers, reverse complement
+src/piece_store.rs    packed pieces (2-bit bases + 8 B views), id reuse, base compaction
+src/minimizer.rs      canonical ℓ-mer values, monotone-deque minima, tied positions
+src/index.rs          flat fixed-capacity two-choice index with 8-bit tags, spilled
+                      growth, hot-minimizer drain
+src/table.rs          KmerTable: insert_read / insert_chunk / end_read / contains / stats,
+                      layer-2 / layer-3 routing
+src/edit.rs           delete_read / delete (piece cuts), defrag, defrag_incremental,
+                      fragmentation, verify_index
+src/stream_query.rs   StreamingQuery: in-order queries with hit extension and candidate cache
+src/oracle.rs         HashSet<u64> oracle
+src/fastx.rs          FASTA/FASTQ(.gz) reader;  src/rng.rs  SplitMix64 + synthetic genomes
+src/bin/unihash_bench.rs  benchmark driver
 src/bin/unihash_churn.rs  deletion / re-insertion churn × defragmentation policies
-tests/m{1,...,7}_*.rs     tests per milestone (unit, oracle, invariance, small-k fuzz,
-                          chunked-insertion equivalence, buffer bound, streaming
-                          queries, hot routing and disk spill, hardening)
+tests/m{1,...,7}_*.rs     codec, minimizers, store and index, table against the oracle
+                          (invariance, small-k fuzz, chunked-insertion equivalence,
+                          buffer bound), streaming queries, hot routing and disk
+                          spill, hardening
 tests/m8_delete.rs        deletion, alternating insert/delete, defrag, small-k exhaustive
 tools/              ci.sh, fetch_data.sh, bench_real.sh, kache_compare.sh, churn_real.sh
 tools/kache/        kache_bench.cpp (kache-hash driver), summarize.py
 ```
 
-## Changes from the C++ plan
+## Design notes
 
-* **Language and tooling.** Rust and Cargo replace C++20 and CMake. The built-in
-  test harness replaces GoogleTest. The `unihash-bench` binary replaces Google
-  Benchmark, because the plan's metrics are end-to-end rather than
-  micro-benchmarks. Overflow checks and the absence of `unsafe` replace ASan and
-  UBSan; Miri and ASan can still be run on nightly.
-* **Piece storage.** Pieces are one packed 2-bit array with a `u64` start offset
-  per piece, not a `std::string` each (plan decision 3 was revisited once the
-  random-order measurements justified packing).
-* **Index layout.** The index uses flat fixed-capacity two-choice buckets with
-  automatic growth, not a `Vec` per bucket and a fixed bucket count (the plan
-  scoped out resizing). Growth recomputes minimizers from pieces, so entries stay
-  9 B.
+* **Testing.** The built-in test harness checks every operation against a
+  `HashSet<u64>` oracle; `unihash-bench` measures end-to-end throughput and
+  memory rather than micro-benchmarks. Overflow checks and the absence of
+  `unsafe` stand in for ASan and UBSan; Miri and ASan can still be run on
+  nightly.
+* **Piece storage.** Pieces are views into one packed 2-bit array rather than a
+  string each; packing was adopted once the random-order measurements justified
+  it.
+* **Index layout.** Flat fixed-capacity two-choice buckets with automatic
+  growth, rather than a `Vec` per bucket and a fixed bucket count. Growth
+  recomputes minimizers from pieces, so entries stay 9 B.
 * **Minimizer order.** ℓ-mers are ranked by a bijective hash of their canonical
-  value, not by the value itself. The plan's lexicographic order was benchmarked
-  and removed: on chr21 it made insertion 4.8× and positive queries 2.5× slower
-  (see `bench/RESULTS.md`).
-* **Streaming insertion.** `insert_chunk` / `end_read` were added, and insertion
-  no longer allocates arrays the size of a segment. Peak RSS for chr21 insertion
-  (without the oracle) fell from 493 MiB to 162 MiB, for a 112 MiB table.
-* **Candidate scan.** `TieOffsets` was added and is the default. The plan's
-  `Range` scan is kept.
-* **Streaming queries.** `query_stream` was added for in-order queries; the plan
-  only had independent `contains`.
-* **Hot-minimizer layers and spilled growth** are additions beyond the plan.
-* **Deletion and defragmentation** are additions beyond the plan (which scoped
-  out deletion). Pieces became views into the base array for that, and
-  `max_piece_len` defaults to 4096 instead of 2^20 to bound the cost of a cut.
+  value, not by the value itself. Lexicographic order was benchmarked and
+  dropped: on chr21 it made insertion 4.8× and positive queries 2.5× slower (see
+  `bench/RESULTS.md`).
+* **Streaming insertion.** `insert_chunk` / `end_read` never allocate arrays the
+  size of a segment. Peak RSS for chr21 insertion (without the oracle) fell from
+  493 MiB to 162 MiB, for a 112 MiB table, when this was introduced.
+* **Candidate scan.** `TieOffsets` is the default; the exhaustive `Range` scan
+  is kept for comparison.
+* **Deletion.** Pieces are views into the base array so that a cut copies
+  nothing, and `max_piece_len` defaults to 4096 to bound the cost of a cut.
 * **Piece minimizer positions.** Each piece's `(m, q)` set is computed with one
   deque pass and a mark array, not a sort followed by dedup.
 
@@ -365,3 +360,7 @@ tools/kache/        kache_bench.cpp (kache-hash driver), summarize.py
   about 10–14 B each at 75–85 % head load (overflow blocks included). When pieces are short (reads), the
   index and the per-piece records dominate; `defrag` after loading reads merges
   overlapping pieces (−20 % on the synthetic read set).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

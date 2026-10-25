@@ -1,4 +1,4 @@
-//! M7 — hash-set oracle used by tests and benchmarks.
+//! Hash-set oracle used by tests and benchmarks.
 
 use crate::codec::{canonicalize, kmer_mask, KmerStream};
 use std::collections::HashSet;

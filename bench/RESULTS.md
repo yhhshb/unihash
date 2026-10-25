@@ -1,4 +1,4 @@
-# Benchmark results (MVP)
+# Benchmark results
 
 k = 31, ℓ = 17, release build, single thread, 1 M negative queries per run, and at
 most 20 M positive queries. Raw outputs are in `results/`. Every run reported
@@ -679,11 +679,11 @@ On the uniform genome with 2^20 buckets the total was 8.18 B/k-mer instead of 3.
    60–80× slower than with the hashed order. The
    hashed order (a bijective mix of the canonical ℓ-mer, with the same tie structure)
    removes most of the skew. Homopolymer windows remain a hot spot under both orders
-   (max bucket 9.7 k entries with hash), which is the "hot-minimizer routing" item
-   in the deferred-work list.
+   (max bucket 9.7 k entries with hash), which hot-minimizer routing later
+   addressed.
 2. **The tie-offset candidate scan** (`--scan ties`, the default) checks only
    `s = q − p` for `p ∈ Q(x) ∪ mirror(Q(x))`, not the full `[q−(k−ℓ), q]` range
-   from plan §5.2. Positive queries do 1.5 candidate comparisons instead of 8.3, and
+   range. Positive queries do 1.5 candidate comparisons instead of 8.3, and
    insertion is 27 % faster. Both modes are exact and both are tested against the
    oracle.
 3. **Negative queries are 3–5× slower than the hash set.** They compute `m(x)`

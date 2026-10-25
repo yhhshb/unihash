@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! # unihash — exact k-mer presence table over piece storage (MVP)
+//! # unihash — exact k-mer presence table over piece storage
 //!
 //! Stores a set of canonical k-mers as sequence *pieces* (maximal runs of
 //! previously absent k-mers taken from inserted reads) and answers exact

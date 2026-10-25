@@ -1,4 +1,4 @@
-//! Milestone 3 — packed piece store and flat minimizer index.
+//! Packed piece store and flat minimizer index.
 
 mod common;
 use common::seeds;

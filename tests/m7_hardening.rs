@@ -1,4 +1,4 @@
-//! Milestone 7 — input validation and error messages.
+//! Input validation and error messages.
 
 use unihash::{Config, ConfigError, KmerError, KmerTable};
 

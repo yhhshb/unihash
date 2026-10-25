@@ -1,4 +1,4 @@
-//! M6 — the public k-mer presence table.
+//! The public k-mer presence table.
 
 use crate::codec::{self, encode, kmer_mask, RollingKmer, INVALID, MAX_K};
 use crate::index::{MinimizerIndex, ScanTrace, SpillStats};
@@ -45,11 +45,11 @@ pub struct Config {
     pub spill_dir: Option<PathBuf>,
 }
 
-/// Candidate positions checked for an index entry `(pid, q)` (spec §5.2).
+/// Candidate positions checked for an index entry `(pid, q)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CandidateScan {
     /// Every start `s` in `[q - (k-ℓ), q]` clipped to the piece, exactly as
-    /// in the plan (up to `k - ℓ + 1` comparisons per entry).
+    /// (up to `k - ℓ + 1` comparisons per entry).
     Range,
     /// Only `s = q - p` for the query's tied positions `p ∈ Q(x)` and their
     /// mirror images `(k-ℓ) - p` (the piece may hold the reverse
@@ -730,7 +730,7 @@ impl KmerTable {
     }
 
     // ------------------------------------------------------------------
-    // Insertion (spec §5.1), streaming
+    // Insertion, streaming
     // ------------------------------------------------------------------
 
     /// Insert all k-mers of `read`. The read is split at non-ACGT characters;
@@ -848,7 +848,7 @@ impl KmerTable {
     }
 
     /// Store the pending run as a piece and index its distinct minimizer
-    /// occurrences `(m, q)` (spec §5.3). With hot-minimizer routing, windows
+    /// occurrences `(m, q)`. With hot-minimizer routing, windows
     /// whose ℓ-minimizer is hot are indexed in layer 2 (or 3) instead.
     fn emit_pending(&mut self, st: &mut Stream) {
         let pid = self.store.add_piece(&st.pending);
@@ -1039,7 +1039,7 @@ impl KmerTable {
     }
 
     // ------------------------------------------------------------------
-    // Queries (spec §5.2)
+    // Queries
     // ------------------------------------------------------------------
 
     /// Exact membership of a packed k-mer (either orientation; it is
@@ -1286,7 +1286,7 @@ impl KmerTable {
     }
 
     /// Number of stored k-mer occurrences that duplicate another stored
-    /// occurrence (spec decision 5: intra-run repeats). Diagnostic, O(n).
+    /// occurrence (intra-run repeats). Diagnostic, O(n).
     pub fn redundant_kmers(&self) -> u64 {
         let mut seen = std::collections::HashSet::with_capacity(self.stored_kmers as usize);
         let mut dup = 0u64;

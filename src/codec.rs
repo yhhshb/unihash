@@ -1,4 +1,4 @@
-//! M1 — k-mer codec.
+//! k-mer codec.
 //!
 //! Base encoding is A=0, C=1, G=2, T=3, so the complement of `b` is `3 - b`.
 //! A k-mer (k ≤ 32) is packed MSB-first into the low `2k` bits of a `u64`:

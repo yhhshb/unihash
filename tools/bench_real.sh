@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Milestone 6 benchmark matrix on real data (see tools/fetch_data.sh).
+# Benchmark matrix on real data (see tools/fetch_data.sh).
 # Results are written to bench/results/<name>.txt.
 #
 # Environment overrides: K (31), L (17), MAX_READS (records per read set,

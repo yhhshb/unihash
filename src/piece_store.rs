@@ -1,4 +1,4 @@
-//! M2 + M4 — packed piece storage.
+//! Packed piece storage.
 //!
 //! All bases live back to back in one array of 2-bit bases (32 bases per
 //! `u64`, first base in the most significant bits). A piece is a *view*

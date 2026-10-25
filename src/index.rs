@@ -1,4 +1,4 @@
-//! M5 — minimizer index: flat, fixed-capacity buckets.
+//! Minimizer index: flat, fixed-capacity buckets.
 //!
 //! An entry records one minimizer occurrence `(piece_id, q)` plus an 8-bit
 //! tag. The minimizer value itself is not stored: a tag false-match is

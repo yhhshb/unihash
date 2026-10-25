@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Download the Milestone 6 benchmark datasets into data/.
+# Download the benchmark datasets into data/.
 # Run this on a machine with access to NCBI, UCSC and ENA.
 #
-#   tools/fetch_data.sh            # E. coli + chr21 (small, ~15 MB compressed)
-#   tools/fetch_data.sh --reads    # also SRR5833294 and SRR5901135 (large)
+#   bash tools/fetch_data.sh            # E. coli + chr21 (small, ~15 MB compressed)
+#   bash tools/fetch_data.sh --reads    # also SRR5833294 and SRR5901135 (large)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p data

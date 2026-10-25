@@ -1,4 +1,4 @@
-//! Milestone 4 — table insertion and query against the oracle.
+//! Table insertion and query against the oracle.
 
 mod common;
 use common::{check_against_oracle, check_invariants, kmer, seeds};

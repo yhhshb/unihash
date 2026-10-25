@@ -1,4 +1,4 @@
-//! Milestone 2 — minimizers with tied positions (hashed order).
+//! Minimizers with tied positions (hashed order).
 
 mod common;
 use common::seeds;

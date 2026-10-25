@@ -3,8 +3,10 @@ name = "unihash"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Exact canonical k-mer presence table over packed sequence pieces with a minimizer index (MVP)"
-license = "MIT OR Apache-2.0"
+description = "Exact canonical k-mer presence table over packed sequence pieces with a minimizer index"
+license = "MIT"
+repository = "https://github.com/yhhshb/unihash"
+readme = "README.md"
 
 [lib]
 name = "unihash"

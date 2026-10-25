@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Local CI for unihash.
 #
-# Rust replaces the plan's ASan/UBSan requirement as follows:
+# Memory and undefined-behaviour safety is checked as follows (in place of
+# ASan/UBSan):
 #   * the crate contains no `unsafe` code (enforced by #![forbid(unsafe_code)]),
 #     so out-of-bounds accesses are caught by bounds checks (panics);
 #   * tests run with overflow-checks and debug-assertions ON, so any shift by
@@ -9,8 +10,8 @@
 #   * optionally, with a nightly toolchain, the suite also runs under Miri
 #     (UB interpreter) and AddressSanitizer — set MIRI=1 / ASAN=1.
 #
-# Usage: tools/ci.sh            # fmt, clippy, tests (checked + release), bench smoke
-#        MIRI=1 ASAN=1 tools/ci.sh
+# Usage: bash tools/ci.sh            # fmt, clippy, tests (checked + release), smoke runs
+#        MIRI=1 ASAN=1 bash tools/ci.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

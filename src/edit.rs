@@ -20,8 +20,8 @@
 //! the cut are recomputed and only those no surviving window needs are
 //! removed.
 //!
-//! A k-mer repeated inside one inserted run is stored twice (plan decision
-//! 5), so deleting one occurrence is not enough: [`KmerTable::delete_read`]
+//! A k-mer repeated inside one inserted run is stored twice (an accepted
+//! redundancy of insertion), so deleting one occurrence is not enough: [`KmerTable::delete_read`]
 //! re-checks its input with a streaming query and deletes leftover copies.
 //!
 //! ## Defragmentation

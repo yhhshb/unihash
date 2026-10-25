@@ -1,4 +1,4 @@
-//! M3 — canonical minimizers with tied positions.
+//! Canonical minimizers with tied positions.
 //!
 //! For a window (a k-mer starting at `s`), its ℓ-mers start at `s..=s+k-ℓ`.
 //! The window minimizer value `m` is the minimum *order value* over the
@@ -10,7 +10,7 @@
 //! The order value of a canonical ℓ-mer is a fixed bijective 64-bit mix of
 //! it ([`order_value`]). A bijection keeps exactly the tie structure of the
 //! plain value (two positions tie iff their canonical ℓ-mers are equal), so
-//! every correctness argument of the plan carries over; it only removes the
+//! every correctness argument for exact minimizers holds; it only removes the
 //! skew of the lexicographic order (poly-A and other low-complexity ℓ-mers
 //! being the minimum of every window that contains them). The plain
 //! lexicographic order was removed after the chr21 benchmark (4.8× slower
@@ -133,7 +133,7 @@ pub fn minimizer_positions_in_window(vals: &[u64], s: usize, w: usize) -> (u64, 
 /// Every position of `vals` that is a (tied) minimizer position of at least
 /// one window of `w` values. Sorted and deduplicated. The minimizer value of
 /// position `q` is `vals[q]`, so these positions are exactly the distinct
-/// `(m, q)` pairs to index for a piece (spec §5.3).
+/// `(m, q)` pairs to index for a piece.
 pub fn piece_minimizer_positions(vals: &[u64], w: usize) -> Vec<u32> {
     let mut out = Vec::new();
     piece_minimizer_positions_into(vals, w, &mut Vec::new(), &mut out);

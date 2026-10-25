@@ -1,4 +1,4 @@
-//! M6 — benchmark and memory-accounting driver.
+//! Benchmark and memory-accounting driver.
 //!
 //! 1. Inserts the input (FASTA/FASTQ files, optionally gzipped, or a
 //!    synthetic genome) into the table **alone** and reports its exact heap

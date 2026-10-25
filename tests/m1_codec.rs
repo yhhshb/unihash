@@ -1,4 +1,4 @@
-//! Milestone 1 — codec and piece sequence access.
+//! Codec and piece sequence access.
 
 mod common;
 use common::seeds;

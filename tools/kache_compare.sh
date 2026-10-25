@@ -3,8 +3,8 @@
 # (Khan, Patro & Pandey, "kache-hash: A dynamic, concurrent, and cache-efficient
 # hash table for streaming k-mer operations", https://github.com/jamshed/kache-hash).
 #
-#   tools/kache_compare.sh                 # E. coli, chr21, SRR5833294 (as bench_real.sh)
-#   tools/kache_compare.sh NAME ARGS...    # one run: NAME + unihash-bench arguments
+#   bash tools/kache_compare.sh                 # E. coli, chr21, SRR5833294 (as bench_real.sh)
+#   bash tools/kache_compare.sh NAME ARGS...    # one run: NAME + unihash-bench arguments
 #
 # For each run:
 #   1. unihash-bench inserts the input, measures every query pattern, and writes
