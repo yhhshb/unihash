@@ -1,0 +1,17 @@
+== unihash-churn ==
+input: ["synthetic/reads_hi.fastq.gz"], 400000 records, 60000000 bases
+operations: 200000 × (delete one unit of ≤ 1000 bases, re-insert the unit deleted 20000 operations earlier)
+build 5.51 s; table 30.96 MB in 284303 pieces; initial defrag 0.515 s: defrag: pieces 284303 → 197224 (87079 joins), bases 18792192 → 16179822, entries 1530154 → 1454044, table 30963096 → 24786520 B
+starting table 24.79 MB (2.415 B/k-mer)
+
+policy                full+inc     ops s  defrag s    total s  defrag %  mean table   max table   end table    random    stream
+never                      0+0      9.91      0.00       9.91      0.0%    27.75 MB    30.96 MB    30.96 MB    2.31 M   20.78 M
+  never-defragmented end state: 263486 pieces (start 197224), 22737978 dead bases, 1970986 B index slack,   deletions                    200000 calls, 17643553 k-mers, 568442 cuts (89716 splits), 1847670 items moved, 0 re-check passes
+  fragmentation                22737978 dead bases, 794495 shared bases, 568442 cuts and 209593 new pieces since defrag (1 full + 0 incremental defrags, 87079 joins)
+  one defrag at the end: 0.456 s, defrag: pieces 263486 → 202181 (61305 joins), bases 38471455 → 14688822, entries 1307063 → 1253344, table 30958720 → 21661984 B
+  overhead estimate 31.5 % vs reclaimed 30.0 %
+overhead:0.1               6+0     10.44      2.76      13.20     20.9%    22.56 MB    24.86 MB    21.82 MB    2.47 M   16.87 M
+inc:0.02+full:0.05        3+13     10.50      1.83      12.32     14.8%    22.62 MB    24.85 MB    22.84 MB    3.37 M   21.84 M
+inc:0.02+full:0.1         0+16      9.98      0.61      10.59      5.8%    23.67 MB    24.85 MB    23.76 MB    3.30 M   21.74 M
+inc:0.05+full:0.1          0+8     10.04      0.41      10.45      3.9%    24.15 MB    25.56 MB    24.09 MB    3.35 M   21.31 M
+inc:0.05+full:0.2          0+8     10.11      0.42      10.52      3.9%    24.15 MB    25.56 MB    24.09 MB    3.25 M   21.26 M

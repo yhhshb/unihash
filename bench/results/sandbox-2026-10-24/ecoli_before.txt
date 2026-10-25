@@ -1,0 +1,115 @@
+== unihash-bench ==
+config: Config { k: 31, l: 17, bucket_bits: 16, max_piece_len: 1048576, scan: TieOffsets }
+input:  ["data/ecoli_NC_000913.3.fa"]
+
+-- insertion --
+records 1, bases 4641652, k-mers 4641622
+table       0.372 s  12.47 M/s
+oracle      0.432 s  10.74 M/s
+
+-- table stats --
+table (k=31, ℓ=17)
+  reads                        1
+  segments (≥k / <k)           1 / 0
+  k-mers processed             4641622
+  present on insert (skipped)  74246
+  pieces                       530
+  pieces split at cap          1
+  total bases                  4583276
+  mean piece length            8647.7
+  stored k-mers                4567376
+  index entries                571445
+  buckets                      65536
+  entries / bucket             8.720
+  piece bytes (used/reserved)  4587524 / 4587524
+  index bytes (used/reserved)  8430204 / 8430204
+  insertion lookups:
+  queries                      4641622
+  hits                         74246
+  entries scanned / query      4.087  (max 83)
+  tag matches / query          0.058
+  candidate k-mers / query     0.097
+  queries with string reads    0.0353
+
+-- memory (heap, after shrink_to_fit) --
+distinct k-mers           4554269
+redundant stored k-mers   13107
+pieces                         4587524 B    1.01 B/k-mer
+index                          8430204 B    1.85 B/k-mer
+  of which bucket headers      1572864 B    0.35 B/k-mer  (24 B/bucket)
+  of which entries             6857340 B    1.51 B/k-mer  (12 B/entry)
+table total                   13017728 B    2.86 B/k-mer
+oracle HashSet<u64>           75497488 B   16.58 B/k-mer
+ideal u64 table @7/8 load     41639030 B    9.14 B/k-mer
+mean piece length         8647.7 bases (index entries / piece 1078.20)
+insertion buffers             11993600 B  (bounded by ~14 × max_piece_len, not by input length)
+
+-- in-order queries: successive k-mers of the inserted input --
+k-mers 4641622, hit rate 1.0000
+indep       0.924 s  5.02 M/s    independent lookups, in sequence order
+stream      0.106 s  43.94 M/s   streaming: rolling minimizer, hit extension, candidate cache
+oracle      0.573 s  8.10 M/s
+independent lookups:
+  queries                      4641622
+  hits                         4641622
+  entries scanned / query      5.332  (max 84)
+  tag matches / query          1.047
+  candidate k-mers / query     1.549
+  queries with string reads    1.0000
+streaming:
+  queries                      4641622
+  hits                         4641622
+  answered by extension        0.9996
+  index lookups, cached m      0.0001
+  index lookups, bucket scan   0.0003
+  entries scanned / query      0.005
+  candidate k-mers / query     0.004
+  MISMATCHES vs oracle       0 (independent 0, streaming 0)
+
+-- random-order queries: 4641622 k-mers sampled uniformly from the inserted input, shuffled --
+table       1.396 s  3.32 M/s
+oracle      0.517 s  8.98 M/s
+  queries                      4641622
+  hits                         4641622
+  entries scanned / query      5.332  (max 84)
+  tag matches / query          1.047
+  candidate k-mers / query     1.549
+  queries with string reads    1.0000
+  MISMATCHES vs oracle         0
+
+-- negative queries (uniform random k-mers absent from the set) --
+table       0.206 s  4.86 M/s
+oracle      0.046 s  21.71 M/s
+  queries                      1000000
+  hits                         0
+  entries scanned / query      8.720  (max 84)
+  tag matches / query          0.034
+  candidate k-mers / query     0.066
+  queries with string reads    0.0336
+  FALSE POSITIVES              0
+
+-- minimizer skew --
+distinct minimizers 566931, entries 571445
+entries/minimizer   #minimizers
+        1-1         564208
+        2-3         2457
+        4-7         228
+        8-15        20
+       16-31        11
+       32-63        6
+       64-127       1
+hottest minimizers:
+  CGGATAAGGCGTTCACG  77
+  AACGCCTTATCCGGCCT  63
+  GCGTCTTATCAGGCCTA  59
+  CGCTACGCTTATCAGGC  56
+  GCGGCGTAAACGCCTTA  51
+  CCGGATAAGGCGTTTAC  39
+  ATAAGGCGTTCACGCCG  38
+  CACGCCGCATCCGGCAA  25
+  CGCCAGCGTCGCATCAG  21
+  GCCGCATCCGGCATGAA  21
+buckets: 65536 total, 14 empty, max occupancy 84
+
+peak RSS after insertion 141.9 MiB (includes the oracle)
+peak RSS 150.2 MiB (end of run, includes query batches and skew histogram)

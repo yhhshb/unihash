@@ -1,0 +1,44 @@
+[package]
+name = "unihash"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Exact canonical k-mer presence table over packed sequence pieces with a minimizer index (MVP)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "unihash"
+path = "src/lib.rs"
+
+[[bin]]
+name = "unihash-bench"
+path = "src/bin/unihash_bench.rs"
+required-features = ["gz"]
+
+[[bin]]
+name = "unihash-churn"
+path = "src/bin/unihash_churn.rs"
+required-features = ["gz"]
+
+[features]
+default = ["gz"]
+# Transparent reading of gzip-compressed FASTA/FASTQ in the benchmark tool.
+gz = ["dep:flate2"]
+
+[dependencies]
+flate2 = { version = "1", optional = true }
+
+[profile.release]
+opt-level = 3
+debug = 1          # keep symbols for profiling
+codegen-units = 1
+lto = "thin"
+
+# Tests run in the dev profile with overflow checks on, which turns
+# shift/arithmetic overflow into panics (the Rust analogue of UBSan for
+# this code base). A faster variant for the large oracle tests:
+[profile.test-opt]
+inherits = "dev"
+opt-level = 2
+overflow-checks = true
+debug-assertions = true

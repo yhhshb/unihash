@@ -1,0 +1,119 @@
+== unihash-bench ==
+config: Config { k: 31, l: 17, bucket_bits: 10, max_piece_len: 1048576, scan: TieOffsets }
+input:  ["data/chr21.fa.gz"]
+
+-- insertion --
+records 1, bases 46709983, k-mers 40087089
+table      11.129 s  3.60 M/s
+oracle      6.885 s  5.82 M/s
+
+-- table stats --
+table (k=31, ℓ=17)
+  reads                        1
+  segments (≥k / <k)           51 / 0
+  k-mers processed             40087089
+  present on insert (skipped)  5372956
+  pieces                       116634
+  pieces split at cap          0
+  total bases                  38213153
+  mean piece length            327.6
+  stored k-mers                34714133
+  index entries                4442853
+  buckets (grew 14×)            672611
+  entries / bucket             6.605  (head load 0.826, overflow blocks 31356)
+  piece bytes (used/reserved)  10486384 / 10486384
+  index bytes (used/reserved)  56317360 / 56317360
+  insertion lookups:
+  queries                      40087089
+  hits                         5372956
+  entries scanned / query      18.015  (max 2119)
+  tag matches / query          7.580
+  candidate k-mers / query     7.991
+  queries with string reads    0.2459
+
+-- memory: table alone (measured before the oracle is built) --
+distinct k-mers              34625350
+redundant stored k-mers      88783
+pieces (2-bit + offsets)         10486384 B   0.303 B/k-mer  (38213153 bases, 116634 pieces)
+index (flat blocks)              56317360 B   1.626 B/k-mer  (703967 × 80 B blocks: 672611 heads + 31356 overflow; 12.7 B/entry)
+table total, accounted           66803744 B   1.929 B/k-mer
+table heap, allocator            66804000 B   1.929 B/k-mer  (live after shrink_to_fit; accounted − allocator = -256 B)
+heap peak during insertion      136866122 B   3.953 B/k-mer  (index growth, Vec slack, I/O and insertion buffers; 75731030 B live before shrink)
+insertion buffers                 2638934 B  (bounded by ~14 × max_piece_len, not by input length)
+RSS: process before table 2.1 MiB, after table 67.1 MiB (+65.0 MiB), peak 122.9 MiB
+oracle HashSet<u64>, allocator  603979792 B  17.443 B/k-mer  (estimate from capacity 603979792 B)
+ideal u64 table @7/8 load       316574628 B   9.143 B/k-mer
+mean piece length            327.6 bases (index entries / piece 38.09)
+
+-- queries: inserted input (positives) --
+workload: 17166787 k-mers from 20623 windows; windows of ≤1000 bases every 2265 bases over 46709983 bases (1 records); hit rate 1.0000
+pattern (same k-mers)        table                         oracle HashSet<u64>
+kmers-in-order                6.422 s     2.67 M/s         2.606 s     6.59 M/s
+kmers-random-order           15.351 s     1.12 M/s         2.746 s     6.25 M/s
+seq-parse-only                0.033 s   524.33 M/s      n/a
+seq-independent               6.650 s     2.58 M/s         5.086 s     3.38 M/s
+seq-streaming                 1.186 s    14.48 M/s      n/a
+k-mers in order (pre-parsed):
+  queries                      17166787
+  hits                         17166787
+  entries scanned / query      20.327  (max 2119)
+  tag matches / query          12.298
+  candidate k-mers / query     12.406
+  queries with string reads    1.0000
+k-mers in random order (pre-parsed):
+  queries                      17166787
+  hits                         17166787
+  entries scanned / query      20.327  (max 2119)
+  tag matches / query          12.298
+  candidate k-mers / query     12.406
+  queries with string reads    1.0000
+streaming:
+  queries                      17166787
+  hits                         17166787
+  answered by extension        0.9838
+  index lookups, cached m      0.0068
+  index lookups, bucket scan   0.0093
+  entries scanned / query      1.509
+  candidate k-mers / query     2.089
+  MISMATCHES vs oracle       0 (in-order 0, random 0, seq 0, streaming 0)
+
+-- negative queries (uniform random k-mers absent from the set) --
+table       0.312 s  3.20 M/s
+oracle      0.087 s  11.51 M/s
+  queries                      1000000
+  hits                         0
+  entries scanned / query      13.194  (max 2118)
+  tag matches / query          0.055
+  candidate k-mers / query     0.102
+  queries with string reads    0.0485
+  FALSE POSITIVES              0
+
+-- minimizer skew --
+distinct minimizers 3939331, entries 4442853
+entries/minimizer   #minimizers
+        1-1         3788411
+        2-3         119336
+        4-7         20060
+        8-15        6896
+       16-31        2782
+       32-63        1154
+       64-127       450
+      128-255       150
+      256-511       59
+      512-1023      26
+     1024-2047      6
+     2048-4095      1
+hottest minimizers:
+  CAAAAAAAAAAAAAAAA  2115
+  AGGCTGAGGCAGGAGAA  1650
+  AAAGTGCTGGGATTACA  1598
+  GGTGGCTCACGCCTGTA  1432
+  ACACACACACACACACA  1398
+  AATAAATAAATAAATAA  1312
+  GATTACAGGCATGAGCC  1113
+  CTGTTGCCCAGGCTGGA  949
+  CCCAGGCTGGAGTGCAG  925
+  CTCGGCTCACTGCAACC  923
+buckets: 672611 total (8 slots each), 15 empty, max chain occupancy 2111, overflow blocks 31356, grew 14×
+
+peak RSS 1041.5 MiB (whole run, includes the oracle and query workloads)

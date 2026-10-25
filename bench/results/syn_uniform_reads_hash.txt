@@ -1,0 +1,88 @@
+== unihash-bench ==
+config: Config { k: 31, l: 17, bucket_bits: 18, max_piece_len: 1048576, order: Hashed, scan: TieOffsets }
+input:  synthetic uniform genome, 4600000 bp, 300000 records
+
+-- insertion --
+records 300000, bases 45000000, k-mers 36000000
+table       5.021 s  7.17 M/s
+oracle      3.916 s  9.19 M/s
+
+-- table stats --
+table (k=31, ℓ=17, order=Hashed)
+  reads                        300000
+  segments (≥k / <k)           300000 / 0
+  k-mers processed             36000000
+  present on insert (skipped)  27466301
+  pieces                       226358
+  pieces split at cap          0
+  total bases                  15324439
+  mean piece length            67.7
+  stored k-mers                8533699
+  index entries                1264425
+  buckets                      262144
+  entries / bucket             4.823
+  piece bytes (used/reserved)  17135311 / 17135311
+  index bytes (used/reserved)  21464556 / 21464556
+  insertion lookups:
+  queries                      36000000
+  hits                         27466301
+  entries scanned / query      2.514  (max 27)
+  tag matches / query          0.933
+  candidate k-mers / query     1.271
+  queries with string reads    0.8138
+
+-- memory (heap, after shrink_to_fit) --
+distinct k-mers           8533699
+redundant stored k-mers   0
+pieces                        17135311 B    2.01 B/k-mer
+index                         21464556 B    2.52 B/k-mer
+  of which bucket headers      6291456 B    0.74 B/k-mer  (24 B/bucket)
+  of which entries            15173100 B    1.78 B/k-mer  (12 B/entry)
+table total                   38599867 B    4.52 B/k-mer
+oracle HashSet<u64>          150994960 B   17.69 B/k-mer
+ideal u64 table @7/8 load     78022390 B    9.14 B/k-mer
+mean piece length         67.7 bases (index entries / piece 5.59)
+
+-- positive queries (k-mers of the inserted input) --
+table       4.156 s  4.81 M/s
+oracle      3.013 s  6.64 M/s
+  queries                      20000000
+  hits                         20000000
+  entries scanned / query      2.540  (max 21)
+  tag matches / query          1.144
+  candidate k-mers / query     1.573
+  queries with string reads    1.0000
+  MISMATCHES vs oracle         0
+
+-- negative queries (uniform random k-mers absent from the set) --
+table       0.330 s  3.03 M/s
+oracle      0.096 s  10.42 M/s
+  queries                      1000000
+  hits                         0
+  entries scanned / query      4.820  (max 28)
+  tag matches / query          0.020
+  candidate k-mers / query     0.030
+  queries with string reads    0.0139
+  FALSE POSITIVES              0
+
+-- minimizer skew --
+distinct minimizers 909318, entries 1264425
+entries/minimizer   #minimizers
+        1-1         655676
+        2-3         234498
+        4-7         19132
+        8-15        12
+hottest minimizers:
+  0x00fc1027ea587d45  8
+  0x0b43ad058bd900f2  8
+  0x026c4cff7314b755  8
+  0x011ac08c9c167d2d  8
+  0x01311b415b841c40  8
+  0x0006365870166968  8
+  0x12bc8121d95d6bec  8
+  0x038feab9a16e54a4  8
+  0x0a19d8238d20974e  8
+  0x0a38afc96d6b6793  8
+buckets: 262144 total, 8213 empty, max occupancy 28
+
+peak RSS 318.9 MiB

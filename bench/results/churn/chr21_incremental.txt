@@ -1,0 +1,17 @@
+== unihash-churn ==
+input: ["data/chr21.fa.gz"], 1 records, 46709983 bases
+operations: 30000 × (delete one unit of ≤ 1000 bases, re-insert the unit deleted 2000 operations earlier)
+build 6.70 s; table 69.98 MB in 119490 pieces; initial defrag 1.956 s: defrag: pieces 119490 → 93105 (26385 joins), bases 38291058 → 37499508, entries 4558867 → 4534434, table 69975456 → 68862016 B
+starting table 68.86 MB (1.984 B/k-mer)
+
+policy                full+inc     ops s  defrag s    total s  defrag %  mean table   max table   end table    random    stream
+never                      0+0     14.86      0.00      14.86      0.0%    72.42 MB    76.28 MB    76.28 MB    2.13 M   19.23 M
+  never-defragmented end state: 145925 pieces (start 93105), 25673871 dead bases, 2945502 B index slack,   deletions                    30000 calls, 23098043 k-mers, 327552 cuts (80806 splits), 5158350 items moved, 1567 re-check passes
+  fragmentation                25673871 dead bases, 1754578 shared bases, 327552 cuts and 80195 new pieces since defrag (1 full + 0 incremental defrags, 26385 joins)
+  one defrag at the end: 1.989 s, defrag: pieces 145925 → 94001 (51924 joins), bases 61490362 → 36013349, entries 4380388 → 4339455, table 76276804 → 66173464 B
+  overhead estimate 14.8 % vs reclaimed 13.2 %
+overhead:0.1               1+0     15.91      1.86      17.77     10.5%    69.51 MB    72.56 MB    70.46 MB    2.23 M   20.12 M
+inc:0.02+full:0.05         0+5     15.49      0.10      15.59      0.6%    69.67 MB    70.66 MB    69.71 MB    2.06 M   15.67 M
+inc:0.02+full:0.1          0+5     15.09      0.10      15.19      0.7%    69.67 MB    70.66 MB    69.71 MB    2.32 M   20.59 M
+inc:0.05+full:0.1          0+1     14.45      0.02      14.47      0.1%    70.73 MB    72.69 MB    72.69 MB    2.31 M   20.18 M
+inc:0.05+full:0.2          0+1     14.66      0.02      14.68      0.1%    70.73 MB    72.69 MB    72.69 MB    2.26 M   18.98 M
