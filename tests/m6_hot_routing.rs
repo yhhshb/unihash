@@ -69,7 +69,10 @@ fn routing_matches_oracle_with_low_thresholds() {
                     let ctx = format!("seed={seed} cfg={c:?}");
                     let st = t.stats();
                     assert!(st.insert.hot1 > 0, "{ctx}: no hot ℓ-minimizer");
-                    if threshold <= 3 {
+                    // With ℓ2 = k an ℓ2-minimizer is the k-mer itself: it can
+                    // only become hot through k-mers stored twice, which eager
+                    // run indexing never does.
+                    if threshold <= 3 && c.fallback_l() != Some(k) {
                         assert!(st.insert.hot2 > 0, "{ctx}: no hot ℓ2-minimizer");
                         assert!(st.layer3_kmers > 0, "{ctx}: layer 3 unused");
                     }

@@ -4,6 +4,230 @@ k = 31, ℓ = 17, release build, single thread, 1 M negative queries per run, an
 most 20 M positive queries. Raw outputs are in `results/`. Every run reported
 **0 mismatches** against the `HashSet<u64>` oracle and **0 false positives**.
 
+## Concurrent insertion and deletion on the laptop (2026-10-28, second run)
+
+`CAPACITY=1 tools/scale.sh` (deletion of every 4th work item after each build).
+Every table, after insertion and after deletion, equal to the single-threaded
+reference with an exact index. Speed-up over 1 thread:
+
+| data | insert 2 / 4 / 8 threads | delete 2 / 4 / 8 threads |
+|---|---|---|
+| E. coli | 2.00 / 3.86 / **5.44** | 1.95 / 3.65 / **4.31** |
+| SRR5833294 (2 M reads) | 1.79 / 4.07 / **5.19** | 1.50 / 3.65 / **4.07** |
+| chr21 | 1.44 / 2.86 / 1.41 | 1.95 / 3.31 / 0.99 |
+
+* **chr21 rerun alone, laptop plugged in**: insertion 1.89 / 3.42 / **4.53×**
+  (8 threads: 1.70 s, 23.6 M k-mers/s, 4.43× `KmerTable`), deletion 1.91 / 3.34
+  / **4.40×** (8 threads: 0.68 s, 4.70× `KmerTable`); lock waits 0.37 s of 13.6
+  thread-seconds (insertion) and 0.005 s (deletion); all exact. The 8-thread
+  drop above came from the machine, as the analysis below suggested.
+* The machine was much slower during this run than during the previous one, in
+  code that has not changed since: single-threaded `KmerTable` insertion took
+  11.4 s on chr21 (7.25 s before) and 37.8 s on SRR (24.9 s), one-thread
+  lock-free queries ran at half the rate, `into_table` took twice as long.
+  Absolute rates are not comparable with the previous run.
+* chr21 at 8 threads: neither insertion nor deletion was held up by the table's
+  locks (lock waits 0.6 s of 50 thread-seconds for insertion, 0.05 s for
+  deletion), yet deletion took as long as with 1 thread; insertion saw 1993
+  involuntary context switches (55 at 4 threads): the threads were preempted.
+  `unihash-scale` now also reports, per row, the share of thread-time spent on a
+  CPU, a single-thread CPU speed check relative to the start of the run, piece
+  lock waits, waits on open pieces and stale retries of deletions, to separate
+  table contention from a busy or throttled machine.
+
+## Concurrent deletion (2026-10-28, sandbox)
+
+`ConcurrentKmerTable::delete_read` from several threads (`unihash-scale
+--capacity --check --delete-frac 0.25`: after each build, every 4th work item
+is deleted). Rates in M k-mers looked up per second; every result checked
+against `KmerTable::delete_read` on one thread (same k-mers, exact index).
+
+| data | `KmerTable` | 1 thread | 2 threads | 2 vs 1 | 2 vs `KmerTable` |
+|---|---|---|---|---|---|
+| chr21 (179 windows of 64 kbp, 9.1 M k-mers removed) | 3.14 | 3.61 | 5.43 | 1.50× | 1.73× |
+| reads (synthetic, 100 k reads, 4.3 M removed) | 3.34 | 3.47 | 5.46 | 1.58× | 1.63× |
+
+* One concurrent deleter is as fast as `KmerTable` or faster: the right part of a
+  cut is always a new piece, so items are added and removed rather than re-keyed
+  in place, which turns out no slower.
+* Lock waits are negligible (0.03 % of acquisitions contended).
+* Tested in `tests/m11_concurrent_delete.rs` with deleters cutting overlapping
+  stretches, writers inserting new reads and a reader checking that a k-mer never
+  deleted is always found and that nothing never inserted is ever found. Breaking
+  the cut order (shrinking the piece before publishing the right part) or
+  cutting open runs makes these tests fail. Under load (two test processes on
+  2 cores) a debug assertion caught a second cut reaching a right part before
+  all its index items were filed; right parts are now flagged like open runs
+  until filed (80 stressed runs clean). Skipping the gate that keeps
+  promotions out of cuts did not make them fail on 2 cores: that window is
+  narrow, and the gate is kept by construction.
+
+## Concurrent insertion on the laptop with `with_capacity` (2026-10-28)
+
+`CAPACITY=1 tools/scale.sh` on the user's PC (4 cores / 8 SMT threads): the
+concurrent tables are sized with `with_capacity` (E. coli 1024 shards, chr21
+8192, SRR5833294 16384). All tables exact. Insertion speed-up over 1 writer
+(and over `KmerTable`):
+
+| data | 2 threads | 4 threads | 8 threads | 8 threads before (1024 shards, growing) |
+|---|---|---|---|---|
+| E. coli | 1.92× | 3.47× | 3.90× (8.8× vs `KmerTable`¹) | 4.82× |
+| chr21 | 1.82× | 1.25ײ | **3.38×** (3.27×) | 1.71× |
+| SRR5833294, 2 M reads | 2.04× | 3.84× | **5.05×** (5.65×) | 2.22× |
+
+* SRR5833294: 22.2 s with 1 writer (12 % faster than `KmerTable`, which grows
+  its index) → 4.4 s with 8 (20.9 M k-mers/s); near-linear up to the 4 physical
+  cores, +31 % from SMT. Lock waits: 0.13 s of 35 thread-seconds at 8 threads
+  (0.04 % of acquisitions contended), against seconds before. Every input
+  fraction now scales 5–6× at 8 threads (1.9× before from half of the reads on).
+* chr21 at 8 threads: 3.38× (2.2 s) instead of 1.71×.
+* ² chr21 at 4 threads (6.0 s, slower than 2 threads) is a measurement outlier,
+  not contention: lock waits 0.04 s, 80 involuntary context switches. The same
+  run shows other signs of outside load: `into_table` (single-threaded,
+  independent of the thread count) took 5.9 s after the 8-thread build instead
+  of 2 s, and ¹ the single-threaded E. coli reference took 1.2 s instead of
+  0.5 s (hence the inflated "vs `KmerTable`" ratios on E. coli).
+* Memory while inserting: SRR 3.23 B/k-mer, below `KmerTable`'s peak (4.03);
+  chr21 2.41 (`KmerTable` 2.02, peak 2.58). `into_table` gives the
+  `KmerTable` size (3.05 / 2.01).
+* Next bottleneck: `into_table` is single-threaded (5.7–7 s on SRR, more than
+  the 8-thread insertion itself); on reads `with_capacity` under-estimates the
+  index slightly (about 0.15 entries per k-mer instead of the 0.125 assumed:
+  20 k shard growths, 2 thread-seconds).
+
+## Concurrent insertion on the laptop: SMT and lock convoys (2026-10-28)
+
+User's PC: 4 physical cores, 8 hardware threads (SMT). `tools/scale.sh`, 1024
+shards, every table checked against the single-threaded one (all exact).
+Insertion speed-up over 1 writer:
+
+| data | 2 threads | 4 threads | 8 threads | lock-free queries 4 → 8 threads |
+|---|---|---|---|---|
+| E. coli (8 MB table) | 1.98× | 3.58× | 4.82× | +40 % |
+| chr21 (70 MB) | 1.98× | 2.38× | **1.71×** | +29 % |
+| SRR5833294, 2 M reads (245 MB) | 1.91× | 3.33× | **2.22×** | +34 % |
+
+**SMT explains E. coli only.** A second hardware thread on a core typically
+adds 20–40 %; E. coli insertion gains 35 % from 4 to 8 threads, like the
+lock-free queries on every data set. SMT cannot make 8 threads *slower* than 4,
+nor explain chr21 at 4 threads (2.38× while its queries scale 4.1×). On SRR, 8
+threads run at 4.3–5.0× on the first quarter of the reads and drop to 1.9× from
+half of them on: the loss grows with the table.
+
+**Diagnosis (sandbox, instrumented: lock waits, shard growths, context
+switches).** Writers hold a shard's write lock for each lookup-and-append and
+across consecutive k-mers of the same shard; with 1024 shards and about 660 k
+lock acquisitions per second per writer, every writer needs every shard about
+once per millisecond. So whenever a holder is slow, the others pile up on its
+shard and sleep:
+
+* Shard growth runs under the lock: 16 k growths take 15 % of chr21's insertion
+  time, about 75 µs each on chr21 and growing with the shard. Growth is what
+  makes the loss depend on table size.
+* A preempted holder is off the CPU for a scheduler time slice (milliseconds).
+  With as many writers as hardware threads (8 on 8, plus desktop processes)
+  writers get preempted, and every other writer stalls on the preempted
+  holder's shard within a millisecond. Reproduced on the 2-core sandbox with 4
+  writers (oversubscribed): involuntary context switches 140 → 2952, lock waits
+  0.24 → 5.8 thread-seconds, and 4 writers slower than 2 (5.30 vs 5.09 s).
+* Plain collisions are rare (0.1 % of acquisitions) and cheap once spinning.
+
+| chr21, sandbox | 1 writer | 2 writers | 4 writers (2 cores) | lock waits at 2 / 4 |
+|---|---|---|---|---|
+| 1024 shards, growing | 7.96 s | 5.09 s | 5.30 s | 0.24 / 5.79 s |
+| `with_capacity` (8192 shards, no growth) | **6.77 s** | **3.97 s** | **3.82 s** | 0.04 / 2.29 s |
+
+Changes: `ConcurrentKmerTable::with_capacity(cfg, kmers)` (shards scale with
+the table and start large enough not to grow; one writer becomes as fast as
+`KmerTable`), shard locks on separate cache lines, spinning before sleeping on
+a contended lock, and contention counters (`ConcurrentStats::contention`,
+printed by `unihash-scale` with context switches and page faults). The
+remaining limit is that lookups hold the lock; lock-free lookups (bucket
+version counters) would leave only appends under it.
+
+## Concurrent insertion: thread and input-size scaling (2026-10-28, sandbox)
+
+`ConcurrentKmerTable` (1024 layer-1 shards) built by `unihash-scale --check`
+with 1 and 2 writer threads on the 2-core sandbox (the laptop run with up to 8
+threads is `tools/scale.sh`). Every multi-threaded table was checked against
+the single-threaded `KmerTable`: same k-mers, none stored twice, exact index.
+Rates in M k-mers/s (k-mers without N); memory per distinct k-mer.
+
+| data | `KmerTable` | 1 writer | 2 writers | 2 vs 1 | 2 vs `KmerTable` | concurrent table / peak | after `into_table` (`KmerTable`) |
+|---|---|---|---|---|---|---|---|
+| E. coli | 10.64 | 8.48 | 15.33 | 1.81× | 1.44× | 2.02 / 2.02 B | 1.82 B (1.82 B, peak 2.45) |
+| chr21 | 6.42 | 5.24 | 8.91 | 1.70× | 1.39× | 2.33 / 2.33 B | 2.01 B (2.02 B, peak 2.58) |
+| reads (synthetic, 1.6 M × 100–150 b) | 6.32 | 5.15 | 9.51 | 1.85× | 1.50× | 3.05 / 3.05 B | 3.44 B (3.45 B, peak 4.66) |
+
+Queries with 1 / 2 threads (M/s): `KmerTable` (no lock) and the concurrent table
+(shard read locks), uniform positives and random negatives:
+
+| data | `KmerTable` positive | random | streaming | concurrent positive | random |
+|---|---|---|---|---|---|
+| E. coli | 3.84 / 7.72 | 5.01 / 10.01 | 45.9 / 90.4 | 3.40 / 6.43 | 4.47 / 7.61 |
+| chr21 | 1.95 / 4.25 | 2.55 / 6.42 | 39.0 / 45.8 | 1.74 / 2.81 | 2.62 / 4.86 |
+| reads | 1.85 / 3.62 | 3.25 / 6.57 | 16.7 / 27.0 | 1.55 / 3.25 | 3.12 / 5.95 |
+
+* **Exactness.** Also tested in `tests/m10_concurrent.rs`: up to 8 writers
+  inserting the *same* reads in different orders and chunkings (1 to 64
+  shards, hot thresholds down to 1, pieces of 9 bases), readers during
+  insertion (a completed read is always found, nothing outside the final set
+  is ever reported), and round trips with deletion and both defrags. A
+  deliberately injected race (lock released between lookup and append) makes
+  these tests fail immediately.
+* **One writer** is 15–20 % slower than `KmerTable`: a lock per run of k-mers
+  sharing a shard, atomic piece records, the segmented base array (candidate
+  checks in the writer's own piece and chunk bypass it) and index growth that
+  reads pieces through it.
+* **Memory.** The concurrent table carries the fixed costs and slack of 1152
+  shards (+11–15 % on E. coli and chr21), but its peak equals its size: shards
+  grow one at a time, so there is no whole-index growth spike (the
+  `KmerTable` peak is 1.3–1.35× its size). On reads it is even 12 % smaller
+  than `KmerTable`: 1024 shards at independent points of their ×1.5 growth
+  average out the load factor, while the single index happened to have just
+  grown. `into_table` (1 s on chr21) gives the same size as `KmerTable`.
+* **Input size.** On prefixes of chr21 (¼, ½, all) `KmerTable` inserts 6.4–7.1
+  M k-mers/s and on prefixes of the reads (⅛ … all) 6.4–6.9: the cost per k-mer
+  hardly grows with the table. Bytes per k-mer follow the index's growth steps
+  (2.02–2.75 B on chr21, 2.72–3.45 B on reads).
+* The sandbox's two vCPUs scale lock-free queries by only 1.5–2.2×, so the
+  insertion efficiencies above (85–92 %) are close to what the hardware gives.
+
+## Eager run indexing (2026-10-28, sandbox)
+
+`run_indexing: Eager` files each new k-mer in the index as soon as it is
+appended to its piece, instead of indexing the whole run when it ends. Same
+binary, both modes, alternated, 3 runs each; *baseline* is the build before the
+change (deferred only). Insertion rate is the median in M k-mers/s (2-core
+sandbox, ±10 % run to run). Memory per distinct k-mer, after `shrink_to_fit`.
+
+| data | baseline | deferred | **eager** | redundant k-mers (deferred → eager) | table (deferred → eager) | pieces (deferred → eager) |
+|---|---|---|---|---|---|---|
+| E. coli | 9.57 | 9.91 | **11.29** | 2 760 → 0 | 1.819 → 1.819 B/k-mer | 1 643 → 1 724 |
+| chr21 | 6.09 | 6.32 | **6.75** | 81 008 → 0 | 2.021 → 2.020 B/k-mer | 119 490 → 122 335 |
+| reads (synthetic repeats, 400 k × 100–150 b, 0.5 % errors) | 7.93 | 7.78 | 7.78 | 14 215 → 0 | 2.913 → 2.910 B/k-mer | 258 822 → 259 088 |
+
+Laptop (`tools/eager_compare.sh`, medians of 3 runs, deferred → eager):
+E. coli 9.82 → 10.33, chr21 5.81 → 5.89, SRR5833294 (2 M reads) 3.71 → 3.76
+M k-mers/s; identical memory (3.056 B/k-mer on SRR5833294); k-mers stored twice
+2 760 / 81 008 / 5 810 → 0. Eager run indexing is now the default.
+
+* Same k-mer sets (34 625 350 distinct on chr21 in both modes). Eager stores
+  each exactly once; deferred stored k-mers repeated inside one run twice
+  (0.23 % of chr21). Eager has slightly more pieces because a run now ends at
+  an intra-run repeat instead of storing it again; the table is the same size.
+* Insertion is as fast or faster: there is no pending ASCII buffer to re-encode
+  and no second pass computing the piece's ℓ-mer values and minimizer
+  positions. The gain is largest on long records (E. coli, chr21), where runs
+  are long.
+* Peak heap during insertion and query rates are unchanged (within noise).
+* The deferred mode of the new build matches the baseline: the change does not
+  slow the existing path.
+* Correctness: `tests/m9_eager.rs` (both modes against the oracle and each
+  other, identical pieces and index entries on repeat-free input, chunking
+  independence, open-read visibility, deletion and both defrags) and eager
+  variants in `tests/m8_delete.rs`, the bench and the churn smoke runs.
+
 ## Incremental defragmentation on the laptop (2026-10-25)
 
 User's PC, `CHECK=1 tools/churn_real.sh`. Every policy on every data set ended

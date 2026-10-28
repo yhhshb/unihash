@@ -213,6 +213,12 @@ impl MinimizerIndex {
         }
     }
 
+    /// Whether [`reserve`](Self::reserve)`(additional)` would rebuild.
+    #[inline]
+    pub fn needs_growth(&self, additional: u64) -> bool {
+        self.n_entries + additional > (MAX_LOAD * (BLOCK_SLOTS * self.n_buckets) as f64) as u64
+    }
+
     /// Grow first if `additional` more entries would exceed the load limit.
     /// `remin(piece_id, q)` must return the minimizer value of an entry.
     pub fn reserve<F: Fn(PieceId, u32) -> u64>(&mut self, additional: u64, remin: F) {
@@ -495,6 +501,13 @@ impl MinimizerIndex {
     /// Whether `m` has been declared hot. Costs one flag test on `b1`'s head
     /// (the block a lookup reads first anyway) unless that flag is set.
     #[inline(always)]
+    /// Declare `m` hot without draining (its entries must already be gone).
+    pub(crate) fn mark_hot(&mut self, m: u64) {
+        let b1 = self.slot(m).b1;
+        self.hot.insert(m);
+        self.blocks[b1].flags |= HOT_FLAG;
+    }
+
     pub fn is_hot(&self, m: u64) -> bool {
         let b1 = self.slot(m).b1;
         self.blocks[b1].flags & HOT_FLAG != 0 && self.hot.contains(&m)

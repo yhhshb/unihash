@@ -5,7 +5,7 @@
 //! unihash-churn [INPUT...] [--synthetic-repeats LEN] [--max-records N] [--unit BASES] [--ops N] [--lag N]
 //!               [--policy never|every:N|overhead:X|inc:X|inc:X+full:Y]...
 //!               [--check] [--seed S]
-//!               [--max-piece-len N] [--k K] [--l L]
+//!               [--max-piece-len N] [--k K] [--l L] [--run-indexing deferred|eager]
 //! ```
 //!
 //! The table is built from the inputs and defragmented once (the starting
@@ -125,6 +125,9 @@ fn parse_args() -> Args {
                 a.cfg.max_piece_len = val().parse().unwrap_or_else(|e| die(format!("{e}")))
             }
             "--check" => a.check = true,
+            "--run-indexing" => {
+                a.cfg.run_indexing = val().parse().unwrap_or_else(|e: String| die(e))
+            }
             "--synthetic-repeats" => {
                 a.synthetic = val().parse().unwrap_or_else(|e| die(format!("{e}")))
             }

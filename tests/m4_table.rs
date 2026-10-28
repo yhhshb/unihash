@@ -4,7 +4,7 @@ mod common;
 use common::{check_against_oracle, check_invariants, kmer, seeds};
 use unihash::codec::{canonical_kmers, kmer_mask};
 use unihash::rng::{repeat_rich_genome, sample_reads, Rng};
-use unihash::{CandidateScan, Config, KmerTable, Oracle};
+use unihash::{CandidateScan, Config, KmerTable, Oracle, RunIndexing};
 
 fn cfg(k: usize, l: usize) -> Config {
     Config {
@@ -74,9 +74,13 @@ fn hand_checked_reverse_complement_and_intra_run_repeat() {
     // r1 k-mers: AAAAA AAAAC AAACC AACCC ACCCC CCCCC.
     // r2 = CCCCCGGGGG: CCCCC present; CCCCG, CCCGG absent; CCGGG = rc(CCCGG)
     // and CGGGG = rc(CCCCG) are absent *when scanned* because the pending
-    // run is not indexed yet (accepted redundancy); GGGGG = rc(CCCCC) is
-    // present and closes the run.
-    let mut t = KmerTable::new(cfg(5, 3)).unwrap();
+    // run is not indexed yet (accepted redundancy of deferred run
+    // indexing); GGGGG = rc(CCCCC) is present and closes the run.
+    let mut t = KmerTable::new(Config {
+        run_indexing: RunIndexing::Deferred,
+        ..cfg(5, 3)
+    })
+    .unwrap();
     t.insert_read(b"AAAAACCCCC");
     t.insert_read(b"CCCCCGGGGG");
     assert_eq!(t.pieces().len(), 2);
@@ -94,6 +98,24 @@ fn hand_checked_reverse_complement_and_intra_run_repeat() {
     // a third insertion of the same read adds nothing
     t.insert_read(b"CCCCCGGGGG");
     assert_eq!(t.pieces().len(), 2);
+
+    // Eager run indexing: CCCGG is visible as soon as it is appended, so
+    // CCGGG = rc(CCCGG) is found and closes the run; nothing is stored twice.
+    let mut t = KmerTable::new(cfg(5, 3)).unwrap();
+    assert_eq!(t.config().run_indexing, RunIndexing::Eager);
+    t.insert_read(b"AAAAACCCCC");
+    t.insert_read(b"CCCCCGGGGG");
+    assert_eq!(t.pieces().len(), 2);
+    assert_eq!(t.pieces().piece_seq(1), b"CCCCGG");
+    let st = t.stats();
+    assert_eq!(st.insert.present_hits, 4);
+    assert_eq!(st.stored_kmers, 8);
+    assert_eq!(t.redundant_kmers(), 0);
+    for s in [
+        "CCCCG", "CCCGG", "CCGGG", "CGGGG", "GGGGG", "TTTTT", "GGGTT",
+    ] {
+        assert!(t.contains_seq(s.as_bytes()).unwrap(), "{s}");
+    }
 }
 
 #[test]
@@ -410,13 +432,24 @@ fn insertion_buffers_are_bounded_by_max_piece_len() {
 
 #[test]
 fn open_read_and_end_read_semantics() {
-    let mut t = KmerTable::new(cfg(5, 3)).unwrap();
+    for mode in [RunIndexing::Deferred, RunIndexing::Eager] {
+        open_read_semantics(mode);
+    }
+}
+
+fn open_read_semantics(mode: RunIndexing) {
+    let mut t = KmerTable::new(Config {
+        run_indexing: mode,
+        ..cfg(5, 3)
+    })
+    .unwrap();
     t.end_read(); // no-op without an open read
     assert_eq!(t.stats().insert.reads, 0);
     t.insert_chunk(b"ACG");
     t.insert_chunk(b"TA"); // ACGTA spans the chunk boundary
-                           // The pending run is not visible until it is emitted.
-    assert!(!t.contains(kmer("ACGTA")));
+                           // Deferred: the pending run is not visible until it is emitted.
+                           // Eager: every k-mer is visible as soon as its chunk is inserted.
+    assert_eq!(t.contains(kmer("ACGTA")), mode == RunIndexing::Eager);
     t.end_read();
     assert!(t.contains(kmer("ACGTA")));
     assert_eq!(t.stats().insert.reads, 1);

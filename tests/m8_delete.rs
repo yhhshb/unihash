@@ -7,7 +7,7 @@ use common::seeds;
 use std::collections::HashSet;
 use unihash::codec::{canonical_kmers, kmer_mask, revcomp_seq};
 use unihash::rng::{repeat_rich_genome, sample_reads, Rng};
-use unihash::{CandidateScan, Config, KmerTable, Oracle};
+use unihash::{CandidateScan, Config, KmerTable, Oracle, RunIndexing};
 
 /// Answers, stored k-mer set and index layers all agree with the oracle.
 fn check(t: &KmerTable, o: &Oracle, probes: &[Vec<u8>], rng: &mut Rng, ctx: &str) {
@@ -50,6 +50,13 @@ fn check(t: &KmerTable, o: &Oracle, probes: &[Vec<u8>], rng: &mut Rng, ctx: &str
     );
     let st = t.stats();
     assert_eq!(st.stored_kmers, occ, "{ctx}: stored_kmers counter");
+    if t.config().run_indexing == RunIndexing::Eager {
+        assert_eq!(
+            occ,
+            o.len() as u64,
+            "{ctx}: eager run indexing stored a duplicate"
+        );
+    }
     for (pid, p) in t.pieces().iter().enumerate() {
         assert!(
             p.is_empty() || p.len() >= k,
@@ -109,6 +116,24 @@ fn configs() -> Vec<Config> {
             l2: 32,
             hot_threshold: 2,
             bucket_bits: 0,
+            ..Config::default()
+        },
+        Config {
+            k: 21,
+            l: 11,
+            bucket_bits: 2,
+            hot_threshold: 3,
+            max_piece_len: 60,
+            run_indexing: RunIndexing::Deferred,
+            ..Config::default()
+        },
+        Config {
+            k: 32,
+            l: 19,
+            l2: 32,
+            hot_threshold: 2,
+            bucket_bits: 0,
+            run_indexing: RunIndexing::Deferred,
             ..Config::default()
         },
     ]

@@ -43,6 +43,36 @@ pub struct Config {
     /// Directory for temporary spill files written while the index grows
     /// (`None`: spill to a compact in-memory list).
     pub spill_dir: Option<PathBuf>,
+    /// When the k-mers of a run of absent k-mers become visible to lookups.
+    pub run_indexing: RunIndexing,
+}
+
+/// When insertion indexes the run of absent k-mers it is building.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RunIndexing {
+    /// The run is stored as a piece and indexed when it ends. A k-mer that
+    /// occurs twice inside one run is stored twice (see
+    /// [`KmerTable::redundant_kmers`]).
+    Deferred,
+    /// The run's piece is created at its first k-mer and every k-mer is
+    /// indexed as soon as it is appended, so it is visible to the next
+    /// lookup: no k-mer is ever stored twice, and an open read's k-mers are
+    /// already queryable. Required by [`crate::ConcurrentKmerTable`].
+    #[default]
+    Eager,
+}
+
+impl std::str::FromStr for RunIndexing {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "deferred" => Ok(Self::Deferred),
+            "eager" => Ok(Self::Eager),
+            _ => Err(format!(
+                "unknown run indexing '{s}' (expected deferred|eager)"
+            )),
+        }
+    }
 }
 
 /// Candidate positions checked for an index entry `(pid, q)`.
@@ -84,6 +114,7 @@ impl Default for Config {
             l2: 0,
             hot_threshold: 64,
             spill_dir: None,
+            run_indexing: RunIndexing::default(),
         }
     }
 }
@@ -222,7 +253,7 @@ pub struct QueryTrace {
 }
 
 impl QueryTrace {
-    fn add_scan(&mut self, s: &ScanTrace) {
+    pub(crate) fn add_scan(&mut self, s: &ScanTrace) {
         self.entries_scanned += s.entries_scanned;
         self.tag_matches += s.tag_matches;
     }
@@ -365,6 +396,19 @@ pub struct QueryStats {
 }
 
 impl QueryStats {
+    /// Add the counters of `o` (e.g. another thread's).
+    pub fn merge(&mut self, o: &QueryStats) {
+        self.queries += o.queries;
+        self.hits += o.hits;
+        self.entries_scanned += o.entries_scanned;
+        self.tag_matches += o.tag_matches;
+        self.candidate_comparisons += o.candidate_comparisons;
+        self.queries_with_string_reads += o.queries_with_string_reads;
+        self.max_entries_scanned = self.max_entries_scanned.max(o.max_entries_scanned);
+        self.layer2 += o.layer2;
+        self.layer3 += o.layer3;
+    }
+
     pub fn record(&mut self, hit: bool, t: &QueryTrace) {
         self.queries += 1;
         self.hits += hit as u64;
@@ -434,12 +478,31 @@ pub struct InsertStats {
     pub present_hits: u64,
     /// Pieces emitted because a run reached `max_piece_len`.
     pub cap_splits: u64,
+    /// Concurrent insertion: pieces closed because a writer's base chunk
+    /// was full (the run continues in a new piece, overlapping by k - 1).
+    pub chunk_splits: u64,
     /// ℓ-minimizers declared hot (entries moved to layer 2).
     pub hot1: u64,
     /// ℓ2-minimizers declared hot (k-mers moved to layer 3).
     pub hot2: u64,
     /// Lookup work done during insertion.
     pub lookup: QueryStats,
+}
+
+impl InsertStats {
+    /// Add the counters of `o` (e.g. another thread's).
+    pub fn merge(&mut self, o: &InsertStats) {
+        self.reads += o.reads;
+        self.segments += o.segments;
+        self.short_segments += o.short_segments;
+        self.kmers_processed += o.kmers_processed;
+        self.present_hits += o.present_hits;
+        self.cap_splits += o.cap_splits;
+        self.chunk_splits += o.chunk_splits;
+        self.hot1 += o.hot1;
+        self.hot2 += o.hot2;
+        self.lookup.merge(&o.lookup);
+    }
 }
 
 /// Snapshot of table-level counters and memory.
@@ -517,7 +580,11 @@ impl fmt::Display for TableStats {
             "  pieces                       {}  ({} emptied by deletion)",
             self.pieces, self.empty_pieces
         )?;
-        writeln!(f, "  pieces split at cap          {}", i.cap_splits)?;
+        writeln!(
+            f,
+            "  pieces split at cap / chunk  {} / {}",
+            i.cap_splits, i.chunk_splits
+        )?;
         writeln!(
             f,
             "  total bases (array / live)   {} / {}",
@@ -598,6 +665,14 @@ pub(crate) struct Stream {
     hot_windows: Vec<(PieceId, u32)>,
     /// Minimizers whose insertion overflowed (checked for hotness).
     check: Vec<u64>,
+    /// Eager run indexing: the open piece holding the current run.
+    open: Option<PieceId>,
+    /// Eager run indexing: bit `i` of `marks1` / `marks2` is set if
+    /// position `mark_base + i` of the open piece is already filed in
+    /// layer 1 / layer 2 (positions below the current window are final).
+    mark_base: u32,
+    marks1: u64,
+    marks2: u64,
 }
 
 impl Stream {
@@ -616,6 +691,10 @@ impl Stream {
             pwin: WindowMin::new(k - l + 1),
             hot_windows: Vec::new(),
             check: Vec::new(),
+            open: None,
+            mark_base: 0,
+            marks1: 0,
+            marks2: 0,
         }
     }
 
@@ -650,7 +729,7 @@ pub struct KmerTable {
     pub(crate) index: MinimizerIndex,
     /// Fallback minimizer length (0: routing disabled) and its window size.
     pub(crate) l2: usize,
-    w2: usize,
+    pub(crate) w2: usize,
     /// Layer 2: ℓ2-minimizer index over the same pieces, for the k-mers
     /// whose ℓ-minimizer is hot.
     pub(crate) index2: MinimizerIndex,
@@ -746,8 +825,8 @@ impl KmerTable {
     /// cut anywhere, including inside a k-mer or a run of `N`s: the result is
     /// identical to inserting the concatenation with [`insert_read`]. Memory
     /// does not grow with the read length. Call [`end_read`] after the last
-    /// chunk; until then, the last pending run of the read is not yet visible
-    /// to queries.
+    /// chunk; until then, with [`RunIndexing::Deferred`], the last pending
+    /// run of the read is not yet visible to queries.
     ///
     /// [`insert_read`]: Self::insert_read
     /// [`end_read`]: Self::end_read
@@ -756,6 +835,7 @@ impl KmerTable {
         st.in_read = true;
         let k = self.cfg.k;
         let max_run = self.cfg.max_piece_len as usize - k + 1; // k-mers per piece
+        let eager = self.cfg.run_indexing == RunIndexing::Eager;
 
         for &c in chunk {
             let b = encode(c);
@@ -781,7 +861,7 @@ impl KmerTable {
             // duplicate stored k-mer inside a single piece.
             let mut split = false;
             if st.run_kmers >= max_run {
-                self.emit_pending(&mut st);
+                self.end_run(&mut st);
                 split = true;
             }
 
@@ -792,8 +872,11 @@ impl KmerTable {
             if present {
                 self.stats.present_hits += 1;
                 if st.run_kmers > 0 {
-                    self.emit_pending(&mut st);
+                    self.end_run(&mut st);
                 }
+            } else if eager {
+                self.stats.cap_splits += split as u64;
+                self.eager_push(&mut st, b, m, ties);
             } else {
                 if st.run_kmers == 0 {
                     // Start a run with the k bases of the current k-mer.
@@ -828,7 +911,7 @@ impl KmerTable {
     /// Close the current ACGT segment (non-ACGT character or end of read).
     fn end_segment(&mut self, st: &mut Stream) {
         if st.run_kmers > 0 {
-            self.emit_pending(st);
+            self.end_run(st);
         }
         if st.seg_len >= self.cfg.k as u64 {
             self.stats.segments += 1;
@@ -845,6 +928,102 @@ impl KmerTable {
     #[inline]
     fn remin1(store: &PieceStore, l: usize, p: PieceId, q: u32) -> u64 {
         order_value(codec::canonicalize(store.kmer_at(p, q, l), l))
+    }
+
+    /// Close the current run of absent k-mers (`run_kmers > 0`).
+    fn end_run(&mut self, st: &mut Stream) {
+        match st.open.take() {
+            Some(pid) => {
+                self.stored_kmers += st.run_kmers as u64;
+                self.edits.inserted_pieces_since_defrag += 1;
+                self.mark_dirty(pid);
+                st.run_kmers = 0;
+            }
+            None => self.emit_pending(st),
+        }
+    }
+
+    /// Eager run indexing: append the absent k-mer just read (its last base
+    /// is `b`, its window minimizer `(m, ties)`) to the open piece, opening
+    /// one if needed, and file its window in the index right away.
+    fn eager_push(&mut self, st: &mut Stream, b: u8, m: u64, ties: u32) {
+        let k = self.cfg.k;
+        let f = st.roll.fwd();
+        let (pid, s0) = match st.open {
+            Some(pid) => {
+                self.store.push_code(b);
+                self.store.grow_piece(pid);
+                (pid, st.run_kmers as u32)
+            }
+            None => {
+                let start = self.store.end();
+                for i in 0..k {
+                    self.store.push_code((f >> (2 * (k - 1 - i))) as u8);
+                }
+                let pid = self.store.close_piece(start);
+                st.open = Some(pid);
+                st.mark_base = 0;
+                st.marks1 = 0;
+                st.marks2 = 0;
+                (pid, 0)
+            }
+        };
+        st.run_kmers += 1;
+        let d = s0 - st.mark_base;
+        st.marks1 = st.marks1.checked_shr(d).unwrap_or(0);
+        st.marks2 = st.marks2.checked_shr(d).unwrap_or(0);
+        st.mark_base = s0;
+        if self.is_hot(m) {
+            self.eager_layer2(st, pid, s0, f);
+            return;
+        }
+        let new = ties as u64 & !st.marks1;
+        if new == 0 {
+            return;
+        }
+        st.marks1 |= new;
+        let l = self.cfg.l;
+        let store = &self.store;
+        self.index
+            .reserve(new.count_ones() as u64, |p, q| Self::remin1(store, l, p, q));
+        let mut overflowed = false;
+        let mut bits = new;
+        while bits != 0 {
+            overflowed |= self.index.insert(m, pid, s0 + bits.trailing_zeros());
+            bits &= bits - 1;
+        }
+        if overflowed && self.l2 > 0 {
+            self.maybe_make_hot1(m);
+        }
+    }
+
+    /// Eager run indexing of window `(pid, s0)` (forward k-mer `f`) whose
+    /// ℓ-minimizer is hot: layer 2, or layer 3 if its ℓ2-minimizer is hot.
+    fn eager_layer2(&mut self, st: &mut Stream, pid: PieceId, s0: u32, f: u64) {
+        let (k, l2) = (self.cfg.k, self.l2);
+        let (m2, ties) = kmer_minimizer_mask(f, k, l2);
+        if self.index2.is_hot(m2) {
+            self.layer3.add(codec::canonicalize(f, k), (pid, s0));
+            return;
+        }
+        let new = ties as u64 & !st.marks2;
+        if new == 0 {
+            return;
+        }
+        st.marks2 |= new;
+        let store = &self.store;
+        self.index2.reserve(new.count_ones() as u64, |p, q| {
+            order_value(codec::canonicalize(store.kmer_at(p, q, l2), l2))
+        });
+        let mut overflowed = false;
+        let mut bits = new;
+        while bits != 0 {
+            overflowed |= self.index2.insert(m2, pid, s0 + bits.trailing_zeros());
+            bits &= bits - 1;
+        }
+        if overflowed {
+            self.maybe_make_hot2(m2);
+        }
     }
 
     /// Store the pending run as a piece and index its distinct minimizer

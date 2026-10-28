@@ -885,7 +885,9 @@ impl KmerTable {
                 return Err(format!("layer-1 entry {e:?} points past its piece"));
             }
             let m = order_value(canonicalize(self.store.kmer_at(e.piece_id, e.q, l), l));
-            have.insert((1, m, e.piece_id, e.q));
+            if !have.insert((1, m, e.piece_id, e.q)) {
+                return Err(format!("duplicate layer-1 entry {e:?}"));
+            }
             n1 += 1;
         }
         if n1 != self.index.num_entries() {

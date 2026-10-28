@@ -22,6 +22,11 @@ name = "unihash-churn"
 path = "src/bin/unihash_churn.rs"
 required-features = ["gz"]
 
+[[bin]]
+name = "unihash-scale"
+path = "src/bin/unihash_scale.rs"
+required-features = ["gz"]
+
 [features]
 default = ["gz"]
 # Transparent reading of gzip-compressed FASTA/FASTQ in the benchmark tool.

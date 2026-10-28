@@ -25,72 +25,16 @@ use unihash::codec::{decode_kmer, kmer_mask, KmerStream};
 use unihash::index::{BLOCK_BYTES, BLOCK_SLOTS};
 use unihash::minimizer::lmer_of_order_value;
 use unihash::rng::{repeat_rich_genome, sample_reads, Rng};
-use unihash::{fastx, CandidateScan, Config, KmerTable, Oracle, QueryStats, QueryTrace};
+use unihash::{
+    fastx, CandidateScan, Config, KmerTable, Oracle, QueryStats, QueryTrace, RunIndexing,
+};
 
 // ---------------------------------------------------------------------------
 // Counting allocator: exact live and peak heap bytes of this process.
 // ---------------------------------------------------------------------------
 
-mod counting {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
-    pub struct Counting;
-    static CURRENT: AtomicUsize = AtomicUsize::new(0);
-    static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-    #[inline]
-    fn add(n: usize) {
-        let c = CURRENT.fetch_add(n, Relaxed) + n;
-        PEAK.fetch_max(c, Relaxed);
-    }
-
-    // SAFETY: every call is forwarded unchanged to the system allocator;
-    // only byte counters are updated around it.
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-            let p = unsafe { System.alloc(l) };
-            if !p.is_null() {
-                add(l.size());
-            }
-            p
-        }
-        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-            let p = unsafe { System.alloc_zeroed(l) };
-            if !p.is_null() {
-                add(l.size());
-            }
-            p
-        }
-        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-            unsafe { System.dealloc(p, l) };
-            CURRENT.fetch_sub(l.size(), Relaxed);
-        }
-        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-            let q = unsafe { System.realloc(p, l, new) };
-            if !q.is_null() {
-                if new >= l.size() {
-                    add(new - l.size());
-                } else {
-                    CURRENT.fetch_sub(l.size() - new, Relaxed);
-                }
-            }
-            q
-        }
-    }
-
-    /// Live heap bytes (sum of requested allocation sizes).
-    pub fn current() -> usize {
-        CURRENT.load(Relaxed)
-    }
-    /// Highest live heap since the last `reset_peak`.
-    pub fn peak() -> usize {
-        PEAK.load(Relaxed)
-    }
-    pub fn reset_peak() {
-        PEAK.store(CURRENT.load(Relaxed), Relaxed);
-    }
-}
+#[path = "common/counting.rs"]
+mod counting;
 
 #[global_allocator]
 static GLOBAL: counting::Counting = counting::Counting;
@@ -108,6 +52,9 @@ TABLE:
                           automatically (default 10)
     --max-piece-len N     maximum piece length in bases (default 4096)
     --scan ties|range     candidate check per index entry (default ties)
+    --run-indexing deferred|eager
+                          index each new k-mer as it is appended (eager,
+                          default) or a run of new k-mers when it ends
     --hot-threshold N     index entries that make a minimizer hot and route
                           its k-mers to the fallback layers (default 64; 0 = off)
     --l2 N                fallback minimizer length (default 0 = min(k, ℓ+8))
@@ -223,6 +170,9 @@ fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args, String>
             "--k" => a.cfg.k = num(&mut it, "--k")?,
             "--l" => a.cfg.l = num(&mut it, "--l")?,
             "--scan" => a.cfg.scan = string(&mut it, "--scan")?.parse::<CandidateScan>()?,
+            "--run-indexing" => {
+                a.cfg.run_indexing = string(&mut it, "--run-indexing")?.parse::<RunIndexing>()?
+            }
             "--bucket-bits" => a.cfg.bucket_bits = num(&mut it, "--bucket-bits")?,
             "--hot-threshold" => a.cfg.hot_threshold = num(&mut it, "--hot-threshold")?,
             "--l2" => a.cfg.l2 = num(&mut it, "--l2")?,
@@ -902,9 +852,13 @@ fn main() {
     println!("\n-- table stats --\n{st}");
 
     // ------------------------------------------------- memory
+    // Without the oracle: eager run indexing never stores a k-mer twice;
+    // otherwise count the distinct stored k-mers (a temporary hash set,
+    // after the table measurements above).
     let distinct = match &oracle {
         Some(o) => o.len() as u64,
-        None => st.stored_kmers, // upper bound without the oracle
+        None if args.cfg.run_indexing == RunIndexing::Eager => st.stored_kmers,
+        None => table.distinct_kmers(),
     };
     let per = |b: usize| b as f64 / distinct.max(1) as f64;
     let blocks = st.buckets as usize + st.overflow_blocks as usize;
@@ -912,7 +866,7 @@ fn main() {
     println!(
         "distinct k-mers              {distinct}{}",
         if oracle.is_none() {
-            " (upper bound: stored k-mers)"
+            " (counted from the pieces)"
         } else {
             ""
         }

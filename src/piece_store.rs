@@ -24,11 +24,11 @@ pub const MAX_PIECE_LEN: u32 = (1 << 24) - 1;
 /// Largest base array (40-bit start field).
 pub const MAX_STORE_BASES: u64 = 1 << 40;
 
-const LEN_BITS: u32 = 24;
-const LEN_MASK: u64 = (1 << LEN_BITS) - 1;
+pub(crate) const LEN_BITS: u32 = 24;
+pub(crate) const LEN_MASK: u64 = (1 << LEN_BITS) - 1;
 
 #[inline(always)]
-fn pack(start: u64, len: u32) -> u64 {
+pub(crate) fn pack(start: u64, len: u32) -> u64 {
     debug_assert!(start < MAX_STORE_BASES && len <= MAX_PIECE_LEN);
     (start << LEN_BITS) | len as u64
 }
@@ -64,6 +64,54 @@ impl PieceStore {
             live_bases: 0,
             empty: 0,
             free: Vec::new(),
+        }
+    }
+
+    /// Take the store apart: packed words, bases written, piece records
+    /// (`start << 24 | len`) and free ids.
+    pub(crate) fn into_raw(self) -> (Vec<u64>, u64, Vec<u64>, Vec<PieceId>) {
+        (self.data, self.n_bases, self.meta, self.free)
+    }
+
+    /// Rebuild a store from [`into_raw`](Self::into_raw) parts. `data` must
+    /// hold at least `ceil(n_bases / 32) + 1` words, the last ones zero past
+    /// `n_bases`; ids of empty pieces not in `free` are added to it.
+    pub(crate) fn from_raw(
+        mut data: Vec<u64>,
+        n_bases: u64,
+        meta: Vec<u64>,
+        mut free: Vec<PieceId>,
+    ) -> Self {
+        let words = (n_bases as usize).div_ceil(32) + 1;
+        assert!(data.len() >= words, "from_raw: base array too short");
+        data.truncate(words);
+        let mut live_bases = 0;
+        let mut empty = 0;
+        let mut listed = vec![false; meta.len()];
+        for &id in &free {
+            listed[id as usize] = true;
+        }
+        for (id, &m) in meta.iter().enumerate() {
+            let len = m & LEN_MASK;
+            assert!(
+                (m >> LEN_BITS) + len <= n_bases,
+                "from_raw: piece {id} past the array"
+            );
+            live_bases += len;
+            if len == 0 {
+                empty += 1;
+                if !listed[id] {
+                    free.push(id as PieceId);
+                }
+            }
+        }
+        Self {
+            data,
+            n_bases,
+            meta,
+            live_bases,
+            empty,
+            free,
         }
     }
 
@@ -157,6 +205,18 @@ impl PieceStore {
         let len = self.n_bases - start;
         assert!(len <= MAX_PIECE_LEN as u64, "piece too long");
         self.push_meta(start, len as u32)
+    }
+
+    /// Extend piece `id`, which must end at the last base of the array, by
+    /// the base just pushed with [`push_code`](Self::push_code).
+    #[inline]
+    pub fn grow_piece(&mut self, id: PieceId) {
+        let (start, len) = self.view(id);
+        debug_assert!(len > 0, "grow_piece on an empty piece");
+        debug_assert_eq!(start + len as u64 + 1, self.n_bases, "piece is not last");
+        assert!(len < MAX_PIECE_LEN, "piece too long");
+        self.meta[id as usize] = pack(start, len + 1);
+        self.live_bases += 1;
     }
 
     /// Bases written so far (the next base goes to this global offset).

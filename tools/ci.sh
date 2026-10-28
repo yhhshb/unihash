@@ -38,12 +38,25 @@ step "benchmark smoke run (must report zero mismatches)"
 cargo run --quiet --release --bin unihash-bench -- \
     --synthetic-repeats 300000 --reads 20000 --bucket-bits 14 --neg 100000 \
     | grep -E "MISMATCHES|FALSE POSITIVES"
+cargo run --quiet --release --bin unihash-bench -- \
+    --synthetic-repeats 300000 --reads 20000 --bucket-bits 14 --neg 100000 --run-indexing deferred \
+    | grep -E "MISMATCHES|FALSE POSITIVES"
 
 step "churn smoke run (deletions, re-insertions, defrag; checked against the oracle)"
 cargo run --quiet --release --bin unihash-churn -- \
     --synthetic-repeats 200000 --unit 300 --ops 3000 --lag 200 --check \
     --policy never --policy overhead:0.05 --policy inc:0.02+full:0.1 --policy every:500 \
     | grep -E "check vs oracle|estimate"
+cargo run --quiet --release --bin unihash-churn -- \
+    --synthetic-repeats 200000 --unit 300 --ops 3000 --lag 200 --check --run-indexing deferred \
+    --policy never --policy inc:0.02+full:0.1 \
+    | grep -E "check vs oracle|estimate"
+
+step "concurrent insertion smoke run (each thread count checked against the single-threaded table)"
+cargo run --quiet --release --bin unihash-scale -- \
+    --synthetic-repeats 300000 --reads 20000 --threads 1,2,4,8 --shards 16 --check \
+    --query-kmers 200000 --neg 200000 --sizes 0.5,1 --delete-frac 0.25 \
+    | grep -E "check"
 
 if [[ "${MIRI:-0}" == "1" ]]; then
     step "Miri (nightly) — unit + small tests"
