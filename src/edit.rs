@@ -228,6 +228,165 @@ struct Run {
 
 const NONE: u64 = u64::MAX;
 
+/// Chains of pieces whose ends overlap by `k − 1` bases, as planned by
+/// [`plan_chains`]: every non-empty piece is in exactly one chain, in walk
+/// order, with `true` if it is read reverse-complemented. Consecutive pieces
+/// overlap by `k − 1` bases.
+pub(crate) struct Chains {
+    pieces: Vec<(PieceId, bool)>,
+    /// Start of each chain in `pieces` (and `pieces.len()` at the end).
+    starts: Vec<u32>,
+    pub(crate) joins: u64,
+}
+
+impl Chains {
+    pub(crate) fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    pub(crate) fn get(&self, i: usize) -> &[(PieceId, bool)] {
+        &self.pieces[self.starts[i] as usize..self.starts[i + 1] as usize]
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &[(PieceId, bool)]> + '_ {
+        (0..self.len()).map(|i| self.get(i))
+    }
+}
+
+/// Plan [`KmerTable::defrag`]'s merges for pieces `0..n` (`view(pid)` gives
+/// a piece's start and length, `kmer_at(g, len)` the `len`-mer at global
+/// offset `g`): pair piece ends whose canonical `(k − 1)`-mers are equal and
+/// orientations compatible, greedily, keeping chains acyclic and within
+/// `cap` bases (union-find), then list the chains. Pieces shorter than `k`
+/// are left out. Merging two such pieces adds no k-mer (the junction windows
+/// are the pieces' own end windows), so any pairing is correct.
+pub(crate) fn plan_chains(
+    n: usize,
+    k: usize,
+    cap: u64,
+    view: impl Fn(PieceId) -> (u64, u32),
+    kmer_at: impl Fn(u64, usize) -> u64,
+) -> Chains {
+    let km1 = k - 1;
+    // 1. Ends of every piece: canonical (k-1)-mer, side, orientation.
+    //    Two ends can be joined iff their keys are equal and
+    //    (sides differ) == (both or neither are in canonical orientation).
+    let mut ends: Vec<(u64, u32, u8)> = Vec::new();
+    for pid in 0..n as PieceId {
+        let (g0, len) = view(pid);
+        if (len as usize) < k {
+            continue;
+        }
+        let pre = kmer_at(g0, km1);
+        let suf = kmer_at(g0 + len as u64 - km1 as u64, km1);
+        for (side, z) in [(0u8, pre), (1u8, suf)] {
+            let c = canonicalize(z, km1);
+            if c == revcomp_kmer(c, km1) {
+                continue; // palindromic overlap: orientation ambiguous
+            }
+            ends.push((c, pid, side | (((z == c) as u8) << 1)));
+        }
+    }
+    ends.sort_unstable();
+
+    // 2. Pair ends greedily; union-find keeps chains acyclic and within
+    //    the cap. partner[2 * pid + side] = 2 * pid' + side'.
+    let mut partner = vec![NONE; 2 * n];
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    let mut comp_len: Vec<u32> = (0..n as PieceId).map(|p| view(p).1).collect();
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            let p = parent[x as usize];
+            parent[x as usize] = parent[p as usize];
+            x = p;
+        }
+        x
+    }
+    let mut joins = 0;
+    let mut i = 0;
+    while i < ends.len() {
+        let mut j = i;
+        while j < ends.len() && ends[j].0 == ends[i].0 {
+            j += 1;
+        }
+        for a in i..j {
+            let (_, pa, ea) = ends[a];
+            let ia = 2 * pa as usize + (ea & 1) as usize;
+            if partner[ia] != NONE {
+                continue;
+            }
+            // Scan a bounded number of candidates (repeat-rich keys can
+            // gather many ends; any compatible pairing is correct).
+            for &(_, pb, eb) in &ends[a + 1..j.min(a + 65)] {
+                let ib = 2 * pb as usize + (eb & 1) as usize;
+                if partner[ib] != NONE || pa == pb {
+                    continue;
+                }
+                let sides_differ = (ea & 1) != (eb & 1);
+                let flags_equal = (ea >> 1) == (eb >> 1);
+                if sides_differ != flags_equal {
+                    continue;
+                }
+                let (ra, rb) = (find(&mut parent, pa), find(&mut parent, pb));
+                if ra == rb {
+                    continue;
+                }
+                let joined =
+                    comp_len[ra as usize] as u64 + comp_len[rb as usize] as u64 - km1 as u64;
+                if joined > cap {
+                    continue;
+                }
+                parent[rb as usize] = ra;
+                comp_len[ra as usize] = joined as u32;
+                partner[ia] = ib as u64;
+                partner[ib] = ia as u64;
+                joins += 1;
+                break;
+            }
+        }
+        i = j;
+    }
+    drop(ends);
+    drop(parent);
+    drop(comp_len);
+
+    // 3. List the chains, each started at a free end (union-find rules out
+    //    cycles), in order of their first piece.
+    let mut visited = vec![false; n];
+    let mut pieces = Vec::new();
+    let mut starts = vec![0u32];
+    for start in 0..n {
+        if visited[start] || (view(start as PieceId).1 as usize) < k {
+            continue;
+        }
+        let enter = if partner[2 * start] == NONE {
+            0
+        } else if partner[2 * start + 1] == NONE {
+            1
+        } else {
+            continue;
+        };
+        let (mut pid, mut side) = (start, enter);
+        loop {
+            visited[pid] = true;
+            pieces.push((pid as PieceId, side == 1));
+            let next = partner[2 * pid + (1 - side)];
+            if next == NONE {
+                break;
+            }
+            pid = (next / 2) as usize;
+            side = (next % 2) as usize;
+        }
+        starts.push(pieces.len() as u32);
+    }
+    debug_assert!((0..n).all(|p| visited[p] || (view(p as PieceId).1 as usize) < k));
+    Chains {
+        pieces,
+        starts,
+        joins,
+    }
+}
+
 /// `defrag_incremental` re-sizes an index when its slack is at least this
 /// fraction of the index bytes.
 pub const INDEX_SHRINK_SLACK: f64 = 1.0 / 16.0;
@@ -669,140 +828,38 @@ impl KmerTable {
         self.index2.release();
         self.layer3.clear();
 
-        // 1. Ends of every piece: canonical (k-1)-mer, side, orientation.
-        //    Two ends can be joined iff their keys are equal and
-        //    (sides differ) == (both or neither are in canonical orientation).
-        let mut ends: Vec<(u64, u32, u8)> = Vec::with_capacity(2 * rep.pieces_before as usize);
-        for pid in 0..n as PieceId {
-            let (g0, len) = self.store.view(pid);
-            if (len as usize) < k {
-                continue;
-            }
-            let pre = self.store.kmer_at_global(g0, km1);
-            let suf = self.store.kmer_at_global(g0 + len as u64 - km1 as u64, km1);
-            for (side, z) in [(0u8, pre), (1u8, suf)] {
-                let c = canonicalize(z, km1);
-                if c == revcomp_kmer(c, km1) {
-                    continue; // palindromic overlap: orientation ambiguous
-                }
-                ends.push((c, pid, side | (((z == c) as u8) << 1)));
-            }
-        }
-        ends.sort_unstable();
-
-        // 2. Pair ends greedily; union-find keeps chains acyclic and within
-        //    max_piece_len. partner[2 * pid + side] = 2 * pid' + side'.
-        let mut partner = vec![NONE; 2 * n];
-        let mut parent: Vec<u32> = (0..n as u32).collect();
-        let mut comp_len: Vec<u32> = (0..n as PieceId).map(|p| self.store.length(p)).collect();
-        fn find(parent: &mut [u32], mut x: u32) -> u32 {
-            while parent[x as usize] != x {
-                let p = parent[x as usize];
-                parent[x as usize] = parent[p as usize];
-                x = p;
-            }
-            x
-        }
-        let mut i = 0;
-        while i < ends.len() {
-            let mut j = i;
-            while j < ends.len() && ends[j].0 == ends[i].0 {
-                j += 1;
-            }
-            for a in i..j {
-                let (_, pa, ea) = ends[a];
-                let ia = 2 * pa as usize + (ea & 1) as usize;
-                if partner[ia] != NONE {
-                    continue;
-                }
-                // Scan a bounded number of candidates (repeat-rich keys can
-                // gather many ends; any compatible pairing is correct).
-                for &(_, pb, eb) in &ends[a + 1..j.min(a + 65)] {
-                    let ib = 2 * pb as usize + (eb & 1) as usize;
-                    if partner[ib] != NONE || pa == pb {
-                        continue;
-                    }
-                    let sides_differ = (ea & 1) != (eb & 1);
-                    let flags_equal = (ea >> 1) == (eb >> 1);
-                    if sides_differ != flags_equal {
-                        continue;
-                    }
-                    let (ra, rb) = (find(&mut parent, pa), find(&mut parent, pb));
-                    if ra == rb {
-                        continue;
-                    }
-                    let joined =
-                        comp_len[ra as usize] as u64 + comp_len[rb as usize] as u64 - km1 as u64;
-                    if joined > cap {
-                        continue;
-                    }
-                    parent[rb as usize] = ra;
-                    comp_len[ra as usize] = joined as u32;
-                    partner[ia] = ib as u64;
-                    partner[ib] = ia as u64;
-                    rep.joins += 1;
-                    break;
-                }
-            }
-            i = j;
-        }
-        drop(ends);
-        drop(parent);
-        drop(comp_len);
+        // 1-2. Pair the pieces' ends into chains.
+        let chains = plan_chains(
+            n,
+            k,
+            cap,
+            |p| self.store.view(p),
+            |g, len| self.store.kmer_at_global(g, len),
+        );
+        rep.joins = chains.joins;
 
         // 3. Write the chains into a new base array.
         let old = std::mem::take(&mut self.store);
         let mut store = PieceStore::with_capacity(old.live_bases(), rep.pieces_before as usize);
-        let mut visited = vec![false; n];
-        let copy = |store: &mut PieceStore, pid: PieceId, rev: bool, skip: usize| {
-            let (g0, len) = old.view(pid);
-            let len = len as u64;
-            if rev {
-                for i in (0..len - skip as u64).rev() {
-                    store.push_code(3 - old.code_at_global(g0 + i));
-                }
-            } else {
-                for i in skip as u64..len {
-                    store.push_code(old.code_at_global(g0 + i));
-                }
-            }
-        };
-        for start in 0..n {
-            if visited[start] || (old.length(start as PieceId) as usize) < k {
-                continue;
-            }
-            // Start chains at a free end (union-find rules out cycles).
-            let enter = if partner[2 * start] == NONE {
-                0
-            } else if partner[2 * start + 1] == NONE {
-                1
-            } else {
-                continue;
-            };
+        for chain in chains.iter() {
             let g = store.end();
-            let (mut pid, mut side) = (start, enter);
-            let mut first = true;
-            loop {
-                visited[pid] = true;
-                copy(
-                    &mut store,
-                    pid as PieceId,
-                    side == 1,
-                    if first { 0 } else { km1 },
-                );
-                first = false;
-                let next = partner[2 * pid + (1 - side)];
-                if next == NONE {
-                    break;
+            for (i, &(pid, rev)) in chain.iter().enumerate() {
+                let skip = if i == 0 { 0 } else { km1 as u64 };
+                let (g0, len) = old.view(pid);
+                let len = len as u64;
+                if rev {
+                    for i in (0..len - skip).rev() {
+                        store.push_code(3 - old.code_at_global(g0 + i));
+                    }
+                } else {
+                    for i in skip..len {
+                        store.push_code(old.code_at_global(g0 + i));
+                    }
                 }
-                pid = (next / 2) as usize;
-                side = (next % 2) as usize;
             }
             store.close_piece(g);
         }
-        debug_assert!((0..n).all(|p| visited[p] || (old.length(p as PieceId) as usize) < k));
-        drop(partner);
-        drop(visited);
+        drop(chains);
         drop(old);
         self.store = store;
 

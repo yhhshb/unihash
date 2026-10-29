@@ -389,7 +389,25 @@ fn chunked_insertion_is_identical_to_whole_reads() {
             for (a, b) in whole.pieces().iter().zip(chunked.pieces().iter()) {
                 assert_eq!(a, b, "{ctx}: piece differs");
             }
-            assert_eq!(whole.insert_stats(), chunked.insert_stats(), "{ctx}");
+            // Same outcome; the work counters may differ (a chunk boundary
+            // drops the extension cursor and the candidate cache).
+            let outcome = |s: &unihash::InsertStats| {
+                (
+                    s.reads,
+                    s.segments,
+                    s.short_segments,
+                    s.kmers_processed,
+                    s.present_hits,
+                    s.cap_splits,
+                    s.hot1,
+                    s.hot2,
+                )
+            };
+            assert_eq!(
+                outcome(whole.insert_stats()),
+                outcome(chunked.insert_stats()),
+                "{ctx}"
+            );
             let ea: Vec<_> = whole.index().iter_entries_with_bucket().collect();
             let eb: Vec<_> = chunked.index().iter_entries_with_bucket().collect();
             assert_eq!(ea, eb, "{ctx}: index differs");

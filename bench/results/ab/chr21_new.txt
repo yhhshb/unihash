@@ -1,0 +1,46 @@
+== unihash-scale ==
+config: Config { k: 31, l: 17, bucket_bits: 10, max_piece_len: 4096, scan: TieOffsets, l2: 0, hot_threshold: 64, spill_dir: None, run_indexing: Eager }, shards 1024, cores 8
+CPU check 1.00× of start
+input: 714 items, 46731373 bases (loaded in 0.4 s)
+single-threaded KmerTable: 40087089 k-mers in 9.727 s, 4.12 M k-mers/s, 34625350 distinct k-mers, 2.020 B/k-mer (peak 2.581)
+queries: 10021773 positive, 10000000 random, streaming over 179 items (11725574 k-mers)
+
+-- thread scaling: insertion (ConcurrentKmerTable, with_capacity(34625350): 8192 shards) --
+threads | insert s | M k-mers/s | speed-up vs 1 thread | vs KmerTable | efficiency | B/k-mer (heap) | peak B/k-mer | into_table s | B/k-mer after | chunk splits
+      1 |   13.012 |       3.08 |                 1.00 |         0.75 |       100 % |          2.706 |        2.707 |        1.367 |         2.007 | 520
+  5368935 lock acquisitions, 0 contended (0.000 %, 0 slept), 0.000 s waiting; 4188 shard growths, 0.118 s; promotions 0.438 s (thread-seconds); writer context switches 0 voluntary (slept), 220 involuntary (preempted); 512 minor page faults; CPU busy 100 % of 1 thread(s); CPU check 1.66× of start
+  check 1 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      2 |    6.473 |       6.19 |                 2.01 |         1.50 |       101 % |          2.706 |        2.707 |        1.390 |         2.007 | 528
+  5370851 lock acquisitions, 947 contended (0.018 %, 25 slept), 0.009 s waiting; 4133 shard growths, 0.093 s; promotions 0.318 s (thread-seconds); writer context switches 25 voluntary (slept), 68 involuntary (preempted); 780 minor page faults; CPU busy 98 % of 2 thread(s); CPU check 1.67× of start
+  check 2 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      4 |    3.286 |      12.20 |                 3.96 |         2.96 |        99 % |          2.705 |        2.707 |        1.413 |         2.007 | 524
+  5371761 lock acquisitions, 3547 contended (0.066 %, 91 slept), 0.033 s waiting; 4198 shard growths, 0.101 s; promotions 0.406 s (thread-seconds); writer context switches 98 voluntary (slept), 68 involuntary (preempted); 1512 minor page faults; CPU busy 96 % of 4 thread(s); CPU check 1.66× of start
+  check 4 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      8 |    6.348 |       6.32 |                 2.05 |         1.53 |        26 % |          2.706 |        2.707 |        1.289 |         2.007 | 523
+  5369902 lock acquisitions, 10007 contended (0.186 %, 251 slept), 0.507 s waiting; 4103 shard growths, 0.277 s; promotions 1.849 s (thread-seconds); writer context switches 277 voluntary (slept), 1649 involuntary (preempted); 91 minor page faults; CPU busy 95 % of 8 thread(s); CPU check 1.67× of start
+  check 8 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+
+-- thread scaling: deletion (every 4th item: 179 items, 10015735 k-mers looked up, 9118984 removed) --
+KmerTable::delete_read, 1 thread: 3.887 s, 2.58 M k-mers/s
+threads | delete s | M k-mers/s | speed-up vs 1 thread | vs KmerTable | removed | dead bases after | B/k-mer after into_table + defrag_incremental
+      1 |    3.540 |       2.83 |                 1.00 |         1.10 | 9118984 |         10172531 | 2.545
+  2857412 lock acquisitions, 0 contended (0.000 %, 0 slept), 0.000 s waiting; 1 shard growths, 0.000 s; promotions 0.000 s (thread-seconds); lock-free lookups restarted 0 times, 0 took the lock; CPU busy 100 % of 1 thread(s); CPU check 1.66× of start
+  check 1 threads after deletion: 25506366 stored k-mers vs 25506366 single-threaded, 0 missing, index exact → OK
+      2 |    2.506 |       4.00 |                 1.41 |         1.55 | 9118984 |         10177795 | 2.545
+  2927260 lock acquisitions, 53 contended (0.002 %, 0 slept), 0.000 s waiting; 4 shard growths, 0.001 s; promotions 0.000 s (thread-seconds); deletions: 180 piece-lock waits (0.034 s), 0 waits on open pieces (0.000 s), 159 stale retries; lock-free lookups restarted 218 times, 6 took the lock; CPU busy 99 % of 2 thread(s); CPU check 1.67× of start
+  check 2 threads after deletion: 25506366 stored k-mers vs 25506366 single-threaded, 0 missing, index exact → OK
+      4 |    1.192 |       8.40 |                 2.97 |         3.26 | 9118984 |         10180696 | 2.545
+  2854601 lock acquisitions, 221 contended (0.008 %, 1 slept), 0.000 s waiting; 2 shard growths, 0.000 s; promotions 0.000 s (thread-seconds); deletions: 145 piece-lock waits (0.034 s), 0 waits on open pieces (0.000 s), 5 stale retries; lock-free lookups restarted 679 times, 26 took the lock; CPU busy 98 % of 4 thread(s); CPU check 2.37× of start
+  check 4 threads after deletion: 25506366 stored k-mers vs 25506366 single-threaded, 0 missing, index exact → OK
+      8 |    1.886 |       5.31 |                 1.88 |         2.06 | 9118984 |         10182311 | 2.544
+  2891130 lock acquisitions, 320 contended (0.011 %, 12 slept), 0.018 s waiting; 5 shard growths, 0.002 s; promotions 0.000 s (thread-seconds); deletions: 363 piece-lock waits (0.289 s), 0 waits on open pieces (0.000 s), 57 stale retries; lock-free lookups restarted 1031 times, 24 took the lock; CPU busy 93 % of 8 thread(s); CPU check 2.56× of start
+  check 8 threads after deletion: 25506366 stored k-mers vs 25506366 single-threaded, 0 missing, index exact → OK
+
+-- thread scaling: queries (M queries/s; no locks: KmerTable is immutable, ConcurrentKmerTable reads its index shards without locking) --
+threads | KmerTable positive | random | streaming | Concurrent positive | random
+      1 |               1.83 |   3.26 |     39.06 |                0.76 |   2.07
+      2 |               3.84 |   7.00 |     64.53 |                1.82 |   3.43
+      4 |               7.52 |  13.63 |    116.55 |                3.25 |   7.04
+      8 |               9.82 |  16.41 |    161.29 |                5.21 |  10.72
+
+check: all multi-threaded tables equal the single-threaded one

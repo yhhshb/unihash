@@ -362,8 +362,7 @@ fn build_workload(src: &Source, k: usize, target: u64, window: usize) -> Workloa
     let mut seq = Batch::default();
     let mut windows = 0u64;
     let mut stride_used = 0u64;
-    let description;
-    if mean <= window as f64 {
+    let description = if mean <= window as f64 {
         let per = (mean - k as f64 + 1.0).max(1.0);
         let every = ((records as f64 * per / target as f64).floor() as u64).max(1);
         let mut r = 0u64;
@@ -384,7 +383,7 @@ fn build_workload(src: &Source, k: usize, target: u64, window: usize) -> Workloa
                 r += 1;
             }
         });
-        description = format!("1 record in {every} of {records} (mean length {mean:.0}), whole");
+        format!("1 record in {every} of {records} (mean length {mean:.0}), whole")
     } else {
         let per = (window - k + 1) as f64;
         let n_windows = (target as f64 / per).ceil().max(1.0);
@@ -432,10 +431,8 @@ fn build_workload(src: &Source, k: usize, target: u64, window: usize) -> Workloa
                 }
             }
         });
-        description = format!(
-            "windows of ≤{window} bases every {stride} bases over {bases} bases ({records} records)"
-        );
-    }
+        format!("windows of ≤{window} bases every {stride} bases over {bases} bases ({records} records)")
+    };
     let mut kmers = Vec::new();
     let mut ks = KmerStream::new(k);
     seq.replay(|c| match c {

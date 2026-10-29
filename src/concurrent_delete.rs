@@ -29,7 +29,7 @@ use super::*;
 use crate::codec::{canonical, canonical_kmers, canonicalize, encode, RollingKmer, INVALID};
 
 /// Index item: (layer, key, offset in the piece).
-type Item = (u8, u64, u32);
+pub(super) type Item = (u8, u64, u32);
 
 enum Cut {
     Done,
@@ -75,7 +75,7 @@ fn backoff(n: u32, c: &mut ContentionStats) {
 
 /// Counters of one deletion call, merged into the table when it returns.
 #[derive(Default)]
-struct Del {
+pub(super) struct Del {
     edits: EditStats,
     cont: ContentionStats,
     changed: Vec<PieceId>,
@@ -360,7 +360,7 @@ impl ConcurrentKmerTable {
 
     /// Add (or remove) index items for piece `pid`, one shard lock at a
     /// time.
-    fn apply(&self, items: &[Item], pid: PieceId, add: bool, d: &mut Del) {
+    pub(super) fn apply(&self, items: &[Item], pid: PieceId, add: bool, d: &mut Del) {
         let (n1, n2) = (self.l1.len(), self.l2s.len());
         let shard = |&(ly, key, _): &Item| match ly {
             1 => shard_of(key, n1),
@@ -420,7 +420,7 @@ impl ConcurrentKmerTable {
 
     /// Index items of windows `s_from..=s_to` of the piece starting at
     /// global offset `g0` (see `KmerTable::window_items`).
-    fn window_items(
+    pub(super) fn window_items(
         &self,
         g0: u64,
         s_from: usize,
@@ -492,7 +492,8 @@ impl ConcurrentKmerTable {
     // ------------------------------------------------------------------
 
     /// Run `f` on the content as a [`KmerTable`] (converted and back, keeping
-    /// the shard count), e.g. for [`KmerTable::defrag`]. O(table).
+    /// the shard count), for operations the concurrent table does not have.
+    /// O(table).
     pub fn with_table<R>(&mut self, f: impl FnOnce(&mut KmerTable) -> R) -> R {
         let shards = self.l1.len();
         let empty = Self::with_shards(self.cfg.clone(), 1).expect("validated configuration");
@@ -500,16 +501,6 @@ impl ConcurrentKmerTable {
         let r = f(&mut t);
         *self = Self::from_table_with_shards(t, shards);
         r
-    }
-
-    /// [`KmerTable::defrag`] (merge overlapping pieces, drop dead space).
-    pub fn defrag(&mut self) -> crate::edit::DefragReport {
-        self.with_table(KmerTable::defrag)
-    }
-
-    /// [`KmerTable::defrag_incremental`].
-    pub fn defrag_incremental(&mut self) -> crate::edit::DefragReport {
-        self.with_table(KmerTable::defrag_incremental)
     }
 
     /// [`KmerTable::fragmentation`] estimate from the deletion counters

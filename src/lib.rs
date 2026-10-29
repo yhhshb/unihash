@@ -25,9 +25,10 @@
 //! ## Several threads
 //! [`ConcurrentKmerTable`] accepts insertions from many threads (one
 //! [`Writer`] each) while others delete and query, with the same guarantees
-//! for every insertion and deletion that has completed. Defragmentation
-//! takes `&mut` (it converts to [`KmerTable`] and back). A `&KmerTable` can
-//! be queried from many threads without any locking.
+//! for every insertion and deletion that has completed, also through
+//! streaming queries ([`ConcurrentKmerTable::query_stream`]).
+//! Defragmentation takes `&mut` and is done in place. A `&KmerTable` can be
+//! queried from many threads without any locking.
 //!
 //! ```
 //! use unihash::{Config, ConcurrentKmerTable};
@@ -57,7 +58,9 @@ mod seg;
 pub mod stream_query;
 pub mod table;
 
-pub use concurrent::{ConcurrentKmerTable, ConcurrentStats, ContentionStats, Writer};
+pub use concurrent::{
+    ConcurrentKmerTable, ConcurrentStats, ConcurrentStreamingQuery, ContentionStats, Writer,
+};
 pub use edit::{EditStats, Fragmentation};
 pub use oracle::Oracle;
 pub use stream_query::{StreamStats, StreamingQuery};

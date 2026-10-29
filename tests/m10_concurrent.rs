@@ -405,3 +405,47 @@ fn open_read_is_visible_after_each_chunk() {
         }
     }
 }
+
+/// Conversions large enough to run on all cores (more than 65 536 index
+/// entries) keep the k-mer set and an exact index, both ways.
+#[test]
+fn parallel_conversions_are_exact() {
+    for seed in seeds(&[3051]) {
+        let c = Config {
+            hot_threshold: 8,
+            ..Config::default()
+        };
+        let mut rng = Rng::new(seed);
+        let genome = repeat_rich_genome(&mut rng, 1_500_000);
+        let reads = sample_reads(&mut rng, &genome, 3000, 100, 400, 0.01);
+        let mut t = KmerTable::new(c.clone()).unwrap();
+        t.insert_read(&genome);
+        for r in &reads {
+            t.insert_read(r);
+        }
+        assert!(
+            t.stats().entries > 1 << 17,
+            "table too small to go parallel"
+        );
+        let mut o = Oracle::new(c.k);
+        o.insert_read(&genome);
+        for r in &reads {
+            o.insert_read(r);
+        }
+        for shards in [64, 4096] {
+            let ct = ConcurrentKmerTable::from_table_with_shards(t.clone(), shards);
+            for x in canonical_kmers(&genome[..20_000], c.k) {
+                assert!(ct.contains(x), "seed={seed} shards={shards}");
+            }
+            let back = ct.into_table();
+            check_table(
+                &back,
+                &o,
+                &reads[..200],
+                &mut rng,
+                &format!("seed={seed} shards={shards}"),
+            );
+            assert_eq!(back.stats().entries, t.stats().entries, "seed={seed}");
+        }
+    }
+}

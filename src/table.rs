@@ -476,6 +476,13 @@ pub struct InsertStats {
     pub kmers_processed: u64,
     /// Lookups that found the k-mer already present (skipped).
     pub present_hits: u64,
+    /// Present k-mers found by extending the previous k-mer's hit (one base
+    /// compared, no index lookup; included in `present_hits`, not in
+    /// `lookup`).
+    pub extensions: u64,
+    /// Index lookups that reused the candidates of the previous lookup
+    /// (same minimizer, index unchanged: no bucket scan).
+    pub cache_reuses: u64,
     /// Pieces emitted because a run reached `max_piece_len`.
     pub cap_splits: u64,
     /// Concurrent insertion: pieces closed because a writer's base chunk
@@ -497,6 +504,8 @@ impl InsertStats {
         self.short_segments += o.short_segments;
         self.kmers_processed += o.kmers_processed;
         self.present_hits += o.present_hits;
+        self.extensions += o.extensions;
+        self.cache_reuses += o.cache_reuses;
         self.cap_splits += o.cap_splits;
         self.chunk_splits += o.chunk_splits;
         self.hot1 += o.hot1;
@@ -632,7 +641,11 @@ impl fmt::Display for TableStats {
         if self.edits.delete_calls + self.edits.defrags + self.edits.incremental_defrags > 0 {
             writeln!(f, "{}", self.edits)?;
         }
-        writeln!(f, "  insertion lookups:")?;
+        writeln!(
+            f,
+            "  insertion: {} k-mers, {} present ({} by hit extension); {} index lookups, {} with cached candidates:",
+            i.kmers_processed, i.present_hits, i.extensions, i.lookup.queries, i.cache_reuses
+        )?;
         write!(f, "{}", i.lookup)
     }
 }
@@ -673,6 +686,56 @@ pub(crate) struct Stream {
     mark_base: u32,
     marks1: u64,
     marks2: u64,
+    /// Where the previous k-mer was found (see [`KmerTable::lookup_for_insert`]).
+    prev: Option<Cursor>,
+    /// Tag-matching layer-1 candidates of minimizer `cache_m`, valid while
+    /// `cache_valid` (the index has not changed under `cache_m` since,
+    /// except by entries also added here).
+    cache_m: u64,
+    cache_valid: bool,
+    cache: Vec<(PieceId, u32)>,
+}
+
+/// Where a k-mer was found in the packed base array, for extension by one
+/// base: the piece's base range `[lo, hi)`, the k-mer's first base `g`, and
+/// whether the piece holds it in the read's orientation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cursor {
+    pub(crate) lo: u64,
+    pub(crate) hi: u64,
+    pub(crate) g: u64,
+    pub(crate) same: bool,
+}
+
+impl Cursor {
+    /// The cursor of hit `h` for a k-mer whose forward value is `fwd`.
+    #[inline]
+    pub(crate) fn of_hit(store: &PieceStore, h: &Hit, fwd: u64) -> Self {
+        let (lo, len) = store.view(h.piece);
+        Cursor {
+            lo,
+            hi: lo + len as u64,
+            g: lo + h.pos as u64,
+            same: h.kmer == fwd,
+        }
+    }
+
+    /// Whether the next k-mer (last base `b`) is in the same piece, right
+    /// after (or, reverse-complemented, right before) this one; if so,
+    /// move to it. `code_at(g)` returns the base at global offset `g`.
+    #[inline(always)]
+    pub(crate) fn extend(&mut self, k: u64, b: u8, code_at: impl Fn(u64) -> u8) -> bool {
+        if self.same {
+            if self.g + k < self.hi && code_at(self.g + k) == b {
+                self.g += 1;
+                return true;
+            }
+        } else if self.g > self.lo && code_at(self.g - 1) == 3 - b {
+            self.g -= 1;
+            return true;
+        }
+        false
+    }
 }
 
 impl Stream {
@@ -695,11 +758,23 @@ impl Stream {
             mark_base: 0,
             marks1: 0,
             marks2: 0,
+            prev: None,
+            cache_m: 0,
+            cache_valid: false,
+            cache: Vec::new(),
         }
+    }
+
+    /// Forget the extension cursor and the candidate cache (the table may
+    /// have changed since they were taken).
+    pub(crate) fn forget_lookups(&mut self) {
+        self.prev = None;
+        self.cache_valid = false;
     }
 
     fn heap_bytes(&self) -> usize {
         self.pending.capacity()
+            + self.cache.capacity() * 8
             + self.vals.capacity() * 8
             + self.marks.capacity()
             + self.positions.capacity() * 4
@@ -715,6 +790,8 @@ impl Stream {
         self.positions = Vec::new();
         self.hot_windows = Vec::new();
         self.check = Vec::new();
+        self.cache = Vec::new();
+        self.cache_valid = false;
     }
 }
 
@@ -833,6 +910,8 @@ impl KmerTable {
     pub fn insert_chunk(&mut self, chunk: &[u8]) {
         let mut st = self.stream.take().expect("insertion state present");
         st.in_read = true;
+        // The table may have been edited since the last chunk.
+        st.forget_lookups();
         let k = self.cfg.k;
         let max_run = self.cfg.max_piece_len as usize - k + 1; // k-mers per piece
         let eager = self.cfg.run_indexing == RunIndexing::Eager;
@@ -865,9 +944,7 @@ impl KmerTable {
                 split = true;
             }
 
-            let mut trace = QueryTrace::default();
-            let present = self.contains_with_minimizer(x, m, ties, &mut trace);
-            self.stats.lookup.record(present, &trace);
+            let present = self.lookup_for_insert(&mut st, x, m, ties, b);
 
             if present {
                 self.stats.present_hits += 1;
@@ -919,9 +996,60 @@ impl KmerTable {
             self.stats.short_segments += 1;
         }
         st.seg_len = 0;
+        st.prev = None;
         st.roll.reset();
         st.lroll.reset();
         st.wmin.clear();
+    }
+
+    /// Whether canonical k-mer `x` (window minimizer `(m, ties)`, last base
+    /// `b`) is present, during insertion. Same answer as
+    /// [`find_with_minimizer`](Self::find_with_minimizer), with two
+    /// shortcuts as in [`StreamingQuery`]: if the previous k-mer was found,
+    /// the next one is present when one stored base matches (no index
+    /// access); and the tag-matching candidates of `m` are kept while
+    /// successive k-mers share `m` and the index does not change under `m`
+    /// except by entries this stream adds (which it adds to the candidates).
+    fn lookup_for_insert(&mut self, st: &mut Stream, x: u64, m: u64, ties: u32, b: u8) -> bool {
+        let k = self.cfg.k;
+        if let Some(c) = st.prev.as_mut() {
+            let store = &self.store;
+            if c.extend(k as u64, b, |g| store.code_at_global(g)) {
+                self.stats.extensions += 1;
+                return true;
+            }
+        }
+        let mut trace = QueryTrace::default();
+        let found = if self.is_hot(m) {
+            self.find_fallback(x, &mut trace)
+        } else {
+            if st.cache_valid && st.cache_m == m {
+                self.stats.cache_reuses += 1;
+            } else {
+                st.cache.clear();
+                let mut scan = ScanTrace::default();
+                self.index.collect_candidates(m, &mut scan, &mut st.cache);
+                trace.add_scan(&scan);
+                st.cache_m = m;
+                st.cache_valid = true;
+            }
+            let ties = self.mirrored_ties(ties);
+            let xr = codec::revcomp_kmer(x, k);
+            let l = self.cfg.l;
+            let mut comparisons = 0u64;
+            let mut found = None;
+            for &(pid, q) in &st.cache {
+                found = self.check_candidate(x, xr, ties, pid, q, l, &mut comparisons);
+                if found.is_some() {
+                    break;
+                }
+            }
+            trace.candidate_comparisons += comparisons;
+            found
+        };
+        self.stats.lookup.record(found.is_some(), &trace);
+        st.prev = found.map(|h| Cursor::of_hit(&self.store, &h, st.roll.fwd()));
+        found.is_some()
     }
 
     /// Minimizer of index-1 entry `(p, q)`: the ℓ-mer at `q`.
@@ -988,12 +1116,21 @@ impl KmerTable {
             .reserve(new.count_ones() as u64, |p, q| Self::remin1(store, l, p, q));
         let mut overflowed = false;
         let mut bits = new;
+        let cached = st.cache_valid && st.cache_m == m;
         while bits != 0 {
-            overflowed |= self.index.insert(m, pid, s0 + bits.trailing_zeros());
+            let q = s0 + bits.trailing_zeros();
+            overflowed |= self.index.insert(m, pid, q);
+            if cached {
+                st.cache.push((pid, q));
+            }
             bits &= bits - 1;
         }
         if overflowed && self.l2 > 0 {
             self.maybe_make_hot1(m);
+            // Not needed for exactness today (a hot `m` is looked up in the
+            // fallback before the cache is consulted, and stays hot for the
+            // whole chunk), but the cache must never outlive a drain.
+            st.cache_valid = false;
         }
     }
 
@@ -1036,6 +1173,7 @@ impl KmerTable {
         self.mark_dirty(pid);
         lmer_values_into(&st.pending, self.cfg.l, &mut st.vals);
         self.index_piece(pid, st);
+        st.cache_valid = false;
         st.pending.clear();
         st.run_kmers = 0;
     }
@@ -1491,9 +1629,27 @@ impl KmerTable {
             .map(move |e| order_value(self.store.canonical_kmer_at(e.piece_id, e.q, l)))
     }
 
-    /// Release unused capacity (useful before measuring memory).
+    /// Release unused capacity (useful once loading is done, and before
+    /// measuring memory). An index whose heads are less than about 75 %
+    /// full (it grows by ×1.5 steps) is also re-sized to ≈ 80 % head load,
+    /// which re-places its entries once.
     pub fn shrink_to_fit(&mut self) {
         self.store.shrink_to_fit();
+        // An index grows by ×1.5 steps, so after loading its heads can be
+        // anywhere between 57 and 85 % full: re-size it to ≈ 80 % when that
+        // saves at least 1/16 of its heads (one O(entries) re-placement).
+        let (l, l2) = (self.cfg.l, self.l2);
+        let store = &self.store;
+        for (ix, ll) in [(&mut self.index, l), (&mut self.index2, l2)] {
+            let target = ix.num_entries() as f64 / (0.8 * crate::index::BLOCK_SLOTS as f64);
+            if ll > 0
+                && target.ceil() < ix.num_buckets() as f64 * (1.0 - crate::edit::INDEX_SHRINK_SLACK)
+            {
+                ix.shrink_to_load(0.8, |p, q| {
+                    order_value(codec::canonicalize(store.kmer_at(p, q, ll), ll))
+                });
+            }
+        }
         self.index.shrink_to_fit();
         self.index2.shrink_to_fit();
         self.layer3.shrink_to_fit();

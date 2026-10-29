@@ -5,11 +5,15 @@
 //! but can be shared between threads: any number of [`Writer`]s insert reads
 //! while other threads call [`ConcurrentKmerTable::delete_read`] /
 //! [`ConcurrentKmerTable::delete`] and [`ConcurrentKmerTable::contains`].
-//! Defragmentation needs exclusive access ([`ConcurrentKmerTable::defrag`],
-//! [`ConcurrentKmerTable::defrag_incremental`], which convert to a
-//! [`KmerTable`] and back); [`ConcurrentKmerTable::into_table`] and
-//! [`ConcurrentKmerTable::from_table`] convert explicitly. Deletion is
-//! described in the `concurrent_delete.rs` part of this module.
+//! [`ConcurrentKmerTable::query_stream`] answers the k-mers of sequences in
+//! order (see [`ConcurrentStreamingQuery`]). Defragmentation needs exclusive
+//! access and is done in place ([`ConcurrentKmerTable::defrag`],
+//! [`ConcurrentKmerTable::defrag_incremental`]);
+//! [`ConcurrentKmerTable::into_table`] and
+//! [`ConcurrentKmerTable::from_table`] convert to and from a [`KmerTable`].
+//! Deletion, defragmentation and streaming queries are described in the
+//! `concurrent_delete.rs`, `concurrent_defrag.rs` and `concurrent_stream.rs`
+//! parts of this module.
 //!
 //! # How it works
 //!
@@ -595,10 +599,14 @@ impl ConcurrentKmerTable {
             .next_power_of_two()
             .clamp(256, 65536);
         // Index entries per k-mer ≈ 2 / (w + 1) (density of a random
-        // minimizer scheme), at a head load of 75 %.
+        // minimizer scheme) plus about one per piece: 0.128 on chr21, 0.151
+        // on a read set (k = 31, ℓ = 17). Size for 2.5 / (w + 1) at a head
+        // load of 80 %: read sets fill the heads to about 77 % (growth starts
+        // at 85 %, shards vary by a few %), genomes to about 66 %. Under-sizing
+        // costs more than it saves: a shard that grows ends at ×1.5 its size.
         let w = (cfg.k + 1).saturating_sub(cfg.l).max(1) as f64;
-        let entries = kmers as f64 * 2.0 / (w + 1.0);
-        let buckets = (entries / (crate::index::BLOCK_SLOTS as f64 * 0.75) / shards as f64).ceil();
+        let entries = kmers as f64 * 2.5 / (w + 1.0);
+        let buckets = (entries / (crate::index::BLOCK_SLOTS as f64 * 0.8) / shards as f64).ceil();
         Self::build(cfg, shards, (buckets as usize).max(1))
     }
 
@@ -688,6 +696,13 @@ impl ConcurrentKmerTable {
                 return self.find(&self.store, &g, x, m, ties, l, self.w, trace);
             }
         }
+        self.locate_hot(x, trace)
+    }
+
+    /// Where canonical `x`, whose ℓ-minimizer is hot, is stored (layers 2
+    /// and 3), if present.
+    pub(crate) fn locate_hot(&self, x: u64, trace: &mut QueryTrace) -> Option<Hit> {
+        let k = self.cfg.k;
         let (m2, ties2) = kmer_minimizer_mask(x, k, self.l2);
         trace.layer2 += 1;
         {
@@ -732,6 +747,68 @@ impl ConcurrentKmerTable {
         trace.add_scan(&scan);
         trace.candidate_comparisons += comparisons;
         found
+    }
+
+    /// [`find`](Self::find) over a list of candidates (collected from a
+    /// locked shard).
+    #[allow(clippy::too_many_arguments)]
+    fn find_in<B: Bases>(
+        &self,
+        bases: &B,
+        cands: &[(PieceId, u32)],
+        x: u64,
+        ties: u32,
+        l: usize,
+        w: usize,
+        trace: &mut QueryTrace,
+    ) -> Option<Hit> {
+        let ties = ties | (ties.reverse_bits() >> (32 - w));
+        let xr = codec::revcomp_kmer(x, self.cfg.k);
+        let mut comparisons = 0u64;
+        let found = cands.iter().find_map(|&(pid, q)| {
+            self.check_candidate(bases, x, xr, ties, pid, q, l, &mut comparisons)
+        });
+        trace.candidate_comparisons += comparisons;
+        found
+    }
+
+    /// The extension cursor of hit `h` (forward k-mer `fwd`), if the bases
+    /// at the position computed from the piece's current view are the hit's
+    /// (bases never change once written, so the cursor stays valid as long
+    /// as some view covers it).
+    ///
+    /// Deletion never moves the start of a piece it keeps, so the check
+    /// fails only when the piece was emptied and its id reused for a new
+    /// piece between the lookup and this call (possible for a hit found in
+    /// layers 2/3, without the layer-1 shard lock). That window is too
+    /// narrow for the tests to hit; the check keeps the cursor exact there.
+    #[inline]
+    fn cursor<B: Bases>(&self, bases: &B, h: &Hit, fwd: u64) -> Option<Cursor> {
+        let g = bases.view(h.piece).0 + h.pos as u64;
+        (bases.kmer_at_global(g, self.cfg.k) == h.kmer).then_some(Cursor {
+            pid: h.piece,
+            g,
+            same: h.kmer == fwd,
+        })
+    }
+
+    /// The next k-mer (last base `b`) is right after the cursor's (or,
+    /// reverse-complemented, right before) in the cursor's piece, whose
+    /// current view still covers it: then it is present (at the moment the
+    /// view is read). Returns the moved cursor.
+    #[inline]
+    fn extend<B: Bases>(&self, bases: &B, c: Cursor, b: u8) -> Option<Cursor> {
+        let k = self.cfg.k as u64;
+        let (lo, len) = bases.view(c.pid);
+        let hi = lo + len as u64;
+        let (g, at, want) = if c.same {
+            (c.g + 1, c.g + k, b)
+        } else {
+            let g = c.g.checked_sub(1)?;
+            (g, g, 3 - b)
+        };
+        (g >= lo && g + k <= hi && self.store.code_at_global(at) == want)
+            .then_some(Cursor { g, ..c })
     }
 
     /// Same check as [`KmerTable`]'s: every hit is read from the piece's
@@ -1020,9 +1097,9 @@ impl ConcurrentKmerTable {
         let mut t = KmerTable::new(cfg).expect("validated configuration");
         t.store = ps;
         let (k, l) = (t.cfg.k, t.cfg.l);
-        t.index = merge_shards(l1, &t.store, l, t.cfg.bucket_bits, &t.cfg);
+        t.index = merge_shards(l1, &t.store, l, &t.cfg);
         if l2 > 0 {
-            t.index2 = merge_shards(l2s, &t.store, l2, 0, &t.cfg);
+            t.index2 = merge_shards(l2s, &t.store, l2, &t.cfg);
         }
         for s in l3.into_vec() {
             let s = s.0.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -1139,18 +1216,56 @@ fn hashset_bytes(cap: usize) -> usize {
     crate::index::hashset_u64_bytes(cap)
 }
 
-/// The indices `0..n` in a scattered order (a fixed odd stride modulo the
-/// next power of two). Entries listed bucket by bucket and re-inserted in
-/// that order would defeat two-choice placement and overflow far more.
-fn scattered(n: usize) -> impl Iterator<Item = usize> {
-    let p = n.next_power_of_two().max(1);
+/// Position `j` of a scattered order of `0..n` (`p` = `n` rounded up to a
+/// power of two): a fixed odd stride modulo `p`, skipping values `≥ n`.
+/// Entries listed bucket by bucket and re-inserted in that order would defeat
+/// two-choice placement and overflow far more.
+#[inline(always)]
+fn scattered_at(j: usize, p: usize) -> usize {
     const STRIDE: usize = 0x9e37_79b9; // odd: a permutation modulo p
-    (0..p)
-        .map(move |i| i.wrapping_mul(STRIDE) & (p - 1))
-        .filter(move |&i| i < n)
+    j.wrapping_mul(STRIDE) & (p - 1)
 }
 
-/// Move every entry of `index` into the shard of its minimizer.
+/// Threads used by conversions: all available cores, or one for small jobs.
+fn conversion_threads(work: usize) -> usize {
+    if work < 1 << 16 {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
+}
+
+/// Work unit of the parallel conversion loops (scattered positions).
+const CONVERT_CHUNK: usize = 1 << 18;
+
+/// Run `f(start, end)` over `0..n` split into chunks, on `threads` threads.
+fn par_ranges<F: Fn(usize, usize) + Sync>(n: usize, chunk: usize, threads: usize, f: F) {
+    if threads <= 1 || n <= chunk {
+        let mut s = 0;
+        while s < n {
+            f(s, (s + chunk).min(n));
+            s += chunk;
+        }
+        return;
+    }
+    let next = AtomicU64::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            let (next, f) = (&next, &f);
+            sc.spawn(move || loop {
+                let s = next.fetch_add(chunk as u64, Ordering::Relaxed) as usize;
+                if s >= n {
+                    break;
+                }
+                f(s, (s + chunk).min(n));
+            });
+        }
+    });
+}
+
+/// Move every entry of `index` into the shard of its minimizer. The shards
+/// are re-sized first for their share of the entries (no growth), then
+/// filled by all cores in a scattered order.
 fn split_into_shards(
     index: MinimizerIndex,
     store: &SharedStore,
@@ -1159,27 +1274,44 @@ fn split_into_shards(
 ) {
     let list: Vec<(PieceId, u32)> = index.iter_entries().map(|e| (e.piece_id, e.q)).collect();
     drop(index);
-    let remin = |p: PieceId, q: u32| order_value(codec::canonicalize(store.kmer_at(p, q, l), l));
-    for i in scattered(list.len()) {
-        let (p, q) = list[i];
-        let m = remin(p, q);
-        let n = shards.len();
-        let g = shards[shard_of(m, n)]
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
-        g.reserve(1, remin);
-        g.insert(m, p, q);
+    let n = shards.len();
+    // Shard sizes are close to the mean (thousands of entries each); size
+    // for a 75 % head load.
+    let per = list.len() as f64 / n as f64;
+    let buckets = ((per / (crate::index::BLOCK_SLOTS as f64 * 0.75)).ceil() as usize).max(1);
+    for s in shards.iter_mut() {
+        let g = s.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let dir = g.spill_dir_owned();
+        *g = MinimizerIndex::with_buckets(buckets).with_spill_dir(dir);
     }
+    let remin = |p: PieceId, q: u32| order_value(codec::canonicalize(store.kmer_at(p, q, l), l));
+    let p = list.len().next_power_of_two().max(1);
+    let shards: &[Pad<RwLock<MinimizerIndex>>] = shards;
+    par_ranges(p, CONVERT_CHUNK, conversion_threads(list.len()), |a, b| {
+        let mut c = ContentionStats::default();
+        for j in a..b {
+            let i = scattered_at(j, p);
+            if i >= list.len() {
+                continue;
+            }
+            let (pid, q) = list[i];
+            let m = remin(pid, q);
+            let mut g = acquire(&shards[shard_of(m, n)], &mut c);
+            g.reserve(1, remin);
+            g.insert(m, pid, q);
+        }
+    });
 }
 
-/// Merge index shards into one index over `store` (entries are spilled to a
-/// compact list as each shard is dropped, so shards and result do not
-/// coexist in full).
+/// Merge index shards into one index over `store`. Entries are listed (8 B
+/// each) as each shard is dropped, so shards and result do not coexist in
+/// full; their minimizers are recomputed from the pieces by all cores, chunk
+/// by chunk, and each chunk is inserted in a scattered order, its head
+/// blocks fetched in batches first.
 fn merge_shards(
     shards: Box<[Pad<RwLock<MinimizerIndex>>]>,
     store: &PieceStore,
     l: usize,
-    bucket_bits: u32,
     cfg: &Config,
 ) -> MinimizerIndex {
     let mut total = 0u64;
@@ -1194,17 +1326,77 @@ fn merge_shards(
         hot.extend(s.hot_minimizers().copied());
     }
     let remin = |p: PieceId, q: u32| order_value(codec::canonicalize(store.kmer_at(p, q, l), l));
-    let mut out = MinimizerIndex::new(bucket_bits).with_spill_dir(cfg.spill_dir.clone());
+    // Sized for the exact entry count at ≈ 80 % head load (as defrag), not
+    // grown from 2^bucket_bits by ×1.5 steps (which land anywhere between
+    // 57 and 85 % load).
+    let buckets = (list.len() as f64 / (0.8 * crate::index::BLOCK_SLOTS as f64)).ceil() as usize;
+    let mut out =
+        MinimizerIndex::with_buckets(buckets.max(1)).with_spill_dir(cfg.spill_dir.clone());
     out.reserve(list.len() as u64, remin);
-    for i in scattered(list.len()) {
-        let (p, q) = list[i];
-        out.insert(remin(p, q), p, q);
+    let n = list.len();
+    let p = n.next_power_of_two().max(1);
+    let threads = conversion_threads(n);
+    // Minimizers of one chunk of scattered positions (u64::MAX: skipped).
+    let chunk = (CONVERT_CHUNK * threads).min(p);
+    let mut ms = vec![0u64; chunk];
+    let mut j0 = 0;
+    while j0 < p {
+        let len = chunk.min(p - j0);
+        let sub = len.div_ceil(threads).max(1);
+        std::thread::scope(|sc| {
+            for (t, part) in ms[..len].chunks_mut(sub).enumerate() {
+                let (list, remin) = (&list, &remin);
+                let start = j0 + t * sub;
+                let mut job = move || {
+                    for (o, slot) in part.iter_mut().enumerate() {
+                        let i = scattered_at(start + o, p);
+                        *slot = if i < n {
+                            let (pid, q) = list[i];
+                            remin(pid, q)
+                        } else {
+                            u64::MAX
+                        };
+                    }
+                };
+                if threads > 1 {
+                    sc.spawn(job);
+                } else {
+                    job();
+                }
+            }
+        });
+        const BATCH: usize = 32;
+        let mut sink = 0usize;
+        for (b, ms_b) in ms[..len].chunks(BATCH).enumerate() {
+            for &m in ms_b {
+                if m != u64::MAX {
+                    sink = sink.wrapping_add(out.touch(m));
+                }
+            }
+            for (o, &m) in ms_b.iter().enumerate() {
+                if m != u64::MAX {
+                    let (pid, q) = list[scattered_at(j0 + b * BATCH + o, p)];
+                    out.insert(m, pid, q);
+                }
+            }
+        }
+        std::hint::black_box(sink);
+        j0 += len;
     }
     for m in hot {
         out.mark_hot(m);
     }
     out.mark_baseline();
     out
+}
+
+/// Where a writer's previous k-mer was found: piece, global offset of its
+/// first base, and whether the piece holds it in the read's orientation.
+#[derive(Clone, Copy)]
+struct Cursor {
+    pid: PieceId,
+    g: u64,
+    same: bool,
 }
 
 /// The lock a writer keeps between consecutive k-mers of the same shard.
@@ -1248,6 +1440,15 @@ struct WriterState<'a> {
     known_hot1: FastSet,
     known_hot2: FastSet,
     last1: Option<(u64, bool)>,
+    /// Where the previous k-mer was found (see [`Writer::kmer`]).
+    prev: Option<Cursor>,
+    /// Shard locks taken so far (`Held` changes); the candidates of
+    /// `cache_m` were collected under acquisition `cache_acq`.
+    acquisitions: u64,
+    cache_m: u64,
+    cache_acq: u64,
+    cache_valid: bool,
+    cache: Vec<(PieceId, u32)>,
     stats: InsertStats,
     cont: ContentionStats,
     stored: u64,
@@ -1280,6 +1481,12 @@ impl<'a> Writer<'a> {
                 known_hot1: FastSet::default(),
                 known_hot2: FastSet::default(),
                 last1: None,
+                prev: None,
+                acquisitions: 0,
+                cache_m: 0,
+                cache_acq: 0,
+                cache_valid: false,
+                cache: Vec::new(),
                 stats: InsertStats::default(),
                 cont: ContentionStats::default(),
                 stored: 0,
@@ -1343,6 +1550,12 @@ impl<'a> Writer<'a> {
 
     /// Look up canonical `x` (window minimizer `(m, ties)`, last base `b`)
     /// in its home shard and, if absent, append it and file it there.
+    /// Shortcuts (as in [`KmerTable`]'s insertion): if the previous k-mer
+    /// was found, this one is present when the piece's current view still
+    /// covers the next position and one base matches (no lock, no index
+    /// access); and the layer-1 candidates of `m` are reused while this
+    /// writer has held `m`'s shard lock since collecting them (nobody else
+    /// changed the shard; this writer adds its own entries to them).
     fn kmer(&mut self, x: u64, m: u64, ties: u32, b: u8, split: bool) {
         let t: &'a ConcurrentKmerTable = self.t;
         let (k, l) = (t.cfg.k, t.cfg.l);
@@ -1350,24 +1563,46 @@ impl<'a> Writer<'a> {
         let f = s.roll.fwd();
         let mut trace = QueryTrace::default();
 
+        if let Some(c) = s.prev {
+            if let Some(c) = t.extend(&s.local(t), c, b) {
+                s.prev = Some(c);
+                s.stats.extensions += 1;
+                s.present();
+                return;
+            }
+        }
+
         // Layer 1, unless m is known to be hot.
         if t.l2 == 0 || !s.known_hot1(m) {
             let sh = shard_of(m, t.l1.len());
             if !matches!(&self.held, Held::L1(h, _) if *h == sh) {
                 self.held = Held::None;
                 self.held = Held::L1(sh, acquire(&t.l1[sh], &mut s.cont));
+                s.acquisitions += 1;
             }
             let Held::L1(_, g) = &mut self.held else {
                 unreachable!()
             };
             if !(t.l2 > 0 && g.is_hot(m)) {
-                let present = t
-                    .find(&s.local(t), g, x, m, ties, l, t.w, &mut trace)
-                    .is_some();
-                s.stats.lookup.record(present, &trace);
-                if present {
+                if s.cache_valid && s.cache_m == m && s.cache_acq == s.acquisitions {
+                    s.stats.cache_reuses += 1;
+                } else {
+                    s.cache.clear();
+                    let mut scan = ScanTrace::default();
+                    g.collect_candidates(m, &mut scan, &mut s.cache);
+                    trace.add_scan(&scan);
+                    s.cache_m = m;
+                    s.cache_acq = s.acquisitions;
+                    s.cache_valid = true;
+                }
+                let local = s.local(t);
+                let found = t.find_in(&local, &s.cache, x, ties, l, t.w, &mut trace);
+                s.stats.lookup.record(found.is_some(), &trace);
+                if let Some(h) = found {
+                    s.prev = t.cursor(&local, &h, f);
                     s.present();
                 } else {
+                    s.prev = None;
                     let (pid, s0) = s.append(t, f, b, split);
                     let new = ties as u64 & !s.marks1;
                     if new != 0 {
@@ -1376,13 +1611,18 @@ impl<'a> Writer<'a> {
                         let mut overflowed = false;
                         let mut bits = new;
                         while bits != 0 {
-                            overflowed |= g.insert(m, pid, s0 + bits.trailing_zeros());
+                            let q = s0 + bits.trailing_zeros();
+                            overflowed |= g.insert(m, pid, q);
+                            if s.cache_m == m {
+                                s.cache.push((pid, q));
+                            }
                             bits &= bits - 1;
                         }
                         if overflowed && t.l2 > 0 {
                             let t0 = Instant::now();
                             t.promote1(g, m, &mut s.stats);
                             s.cont.promotion_ns += t0.elapsed().as_nanos() as u64;
+                            s.cache_valid = false;
                         }
                     }
                 }
@@ -1402,18 +1642,20 @@ impl<'a> Writer<'a> {
             if !matches!(&self.held, Held::L2(h, _) if *h == sh) {
                 self.held = Held::None;
                 self.held = Held::L2(sh, acquire(&t.l2s[sh], &mut s.cont));
+                s.acquisitions += 1;
             }
             let Held::L2(_, g) = &mut self.held else {
                 unreachable!()
             };
             if !g.is_hot(m2) {
-                let present = t
-                    .find(&s.local(t), g, x, m2, ties2, l2, t.w2, &mut trace)
-                    .is_some();
-                s.stats.lookup.record(present, &trace);
-                if present {
+                let local = s.local(t);
+                let found = t.find(&local, g, x, m2, ties2, l2, t.w2, &mut trace);
+                s.stats.lookup.record(found.is_some(), &trace);
+                if let Some(h) = found {
+                    s.prev = t.cursor(&local, &h, f);
                     s.present();
                 } else {
+                    s.prev = None;
                     let (pid, s0) = s.append(t, f, b, split);
                     let new = ties2 as u64 & !s.marks2;
                     if new != 0 {
@@ -1443,12 +1685,19 @@ impl<'a> Writer<'a> {
         trace.layer2 -= 1;
         trace.layer3 += 1;
         let mut g = acquire(&t.l3[shard_of(x, LAYER3_SHARDS)], &mut s.cont);
-        let present = g.get(x).is_some();
-        s.stats.lookup.record(present, &trace);
-        if present {
+        let loc = g.get(x);
+        s.stats.lookup.record(loc.is_some(), &trace);
+        if let Some((piece, pos)) = loc {
             drop(g);
+            let h = Hit {
+                piece,
+                pos,
+                kmer: t.store.kmer_at(piece, pos, k),
+            };
+            s.prev = t.cursor(&s.local(t), &h, f);
             s.present();
         } else {
+            s.prev = None;
             let loc = s.append(t, f, b, split);
             g.add(x, loc);
         }
@@ -1464,6 +1713,7 @@ impl<'a> WriterState<'a> {
             self.stats.short_segments += 1;
         }
         self.seg_len = 0;
+        self.prev = None;
         self.roll.reset();
         self.lroll.reset();
         self.wmin.clear();
@@ -1599,3 +1849,10 @@ impl Drop for Writer<'_> {
 
 #[path = "concurrent_delete.rs"]
 mod delete;
+
+#[path = "concurrent_defrag.rs"]
+mod defrag;
+
+#[path = "concurrent_stream.rs"]
+mod stream;
+pub use stream::ConcurrentStreamingQuery;

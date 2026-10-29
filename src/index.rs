@@ -7,13 +7,15 @@
 //!
 //! ## Layout
 //!
-//! All entries live in one flat `Vec<Block>`. A block is 80 bytes and holds
-//! up to [`BLOCK_SLOTS`] = 8 entries in struct-of-arrays form (8 tags, 8
-//! piece ids, 8 offsets), its fill count, and the index of an overflow block.
-//! Blocks `0..n_buckets` are the bucket heads; overflow blocks are appended
-//! after them. There is no per-bucket allocation, so there is no per-bucket
-//! header: an entry costs 9 bytes plus its share of the block (80 / 8 = 10
-//! bytes per slot).
+//! All entries live in one flat `Vec<Block>`. A block is one 64-byte cache
+//! line (aligned) and holds up to [`BLOCK_SLOTS`] = 7 entries in
+//! struct-of-arrays form (7 tags, 7 piece ids of 4 bytes, 7 offsets of 3
+//! bytes), its fill count, flags, and the index of an overflow block: a
+//! lookup reads one cache line per block. Blocks `0..n_buckets` are the
+//! bucket heads; overflow blocks are appended after them. There is no
+//! per-bucket allocation, so there is no per-bucket header: an entry costs 8
+//! bytes plus its share of the block (64 / 7 ≈ 9.1 bytes per slot). Offsets
+//! are below 2^24 because piece lengths are (see `piece_store`).
 //!
 //! ## Placement
 //!
@@ -59,52 +61,68 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
 /// Entries per block.
-pub const BLOCK_SLOTS: usize = 8;
+pub const BLOCK_SLOTS: usize = 7;
 /// Fraction of head slots that may be used before the index grows.
 pub const MAX_LOAD: f64 = 0.85;
 /// Bucket-count growth factor.
 pub const GROWTH: f64 = 1.5;
 
-const NIL: u32 = u32::MAX;
-const HOT_FLAG: u8 = 1;
-const INDEX_SEED: u64 = 0x2545_f491_4f6c_dd1d;
-const SECOND_SEED: u64 = 0x6a09_e667_f3bc_c909;
+pub(crate) const NIL: u32 = u32::MAX;
+pub(crate) const HOT_FLAG: u8 = 1;
+pub(crate) const INDEX_SEED: u64 = 0x2545_f491_4f6c_dd1d;
+pub(crate) const SECOND_SEED: u64 = 0x6a09_e667_f3bc_c909;
 
-/// Fixed-capacity bucket block (80 bytes).
+/// Fixed-capacity bucket block: one 64-byte cache line.
 #[derive(Clone, Copy, Debug)]
-#[repr(C)]
+#[repr(C, align(64))]
 struct Block {
     tags: [u8; BLOCK_SLOTS],
     len: u8,
+    next: u32,
+    pids: [u32; BLOCK_SLOTS],
+    /// Offsets, 3 bytes each (little-endian).
+    qs: [u8; 3 * BLOCK_SLOTS],
     /// Head blocks: bit 0 set if a hot minimizer has this bucket as `b1`.
     flags: u8,
     _pad: [u8; 2],
-    next: u32,
-    pids: [u32; BLOCK_SLOTS],
-    qs: [u32; BLOCK_SLOTS],
 }
 
 const EMPTY: Block = Block {
     tags: [0; BLOCK_SLOTS],
     len: 0,
-    flags: 0,
-    _pad: [0; 2],
     next: NIL,
     pids: [0; BLOCK_SLOTS],
-    qs: [0; BLOCK_SLOTS],
+    qs: [0; 3 * BLOCK_SLOTS],
+    flags: 0,
+    _pad: [0; 2],
 };
 
 /// Size of one block in bytes.
 pub const BLOCK_BYTES: usize = std::mem::size_of::<Block>();
 
+/// Largest offset an entry can hold.
+pub const MAX_Q: u32 = (1 << 24) - 1;
+
 impl Block {
+    #[inline(always)]
+    fn q(&self, i: usize) -> u32 {
+        let b = &self.qs[3 * i..3 * i + 3];
+        u32::from_le_bytes([b[0], b[1], b[2], 0])
+    }
+
+    #[inline(always)]
+    fn set_q(&mut self, i: usize, q: u32) {
+        debug_assert!(q <= MAX_Q, "offset {q} does not fit in 3 bytes");
+        self.qs[3 * i..3 * i + 3].copy_from_slice(&q.to_le_bytes()[..3]);
+    }
+
     #[inline(always)]
     fn push(&mut self, tag: u8, pid: PieceId, q: u32) {
         let i = self.len as usize;
         debug_assert!(i < BLOCK_SLOTS);
         self.tags[i] = tag;
         self.pids[i] = pid;
-        self.qs[i] = q;
+        self.set_q(i, q);
         self.len += 1;
     }
 }
@@ -193,6 +211,11 @@ impl MinimizerIndex {
     }
 
     /// Spill old entries to temporary files in `dir` during growth.
+    /// The spill directory (for an index built to replace this one).
+    pub(crate) fn spill_dir_owned(&self) -> Option<PathBuf> {
+        self.spill_dir.clone()
+    }
+
     pub fn with_spill_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.spill_dir = dir;
         self
@@ -213,6 +236,15 @@ impl MinimizerIndex {
         }
     }
 
+    /// Read the two head blocks of minimizer `m` (their lengths). Calling
+    /// this for a batch of minimizers before inserting them lets the CPU
+    /// fetch the blocks in parallel.
+    #[inline]
+    pub(crate) fn touch(&self, m: u64) -> usize {
+        let s = self.slot(m);
+        self.blocks[s.b1].len as usize + self.blocks[s.b2].len as usize
+    }
+
     /// Whether [`reserve`](Self::reserve)`(additional)` would rebuild.
     #[inline]
     pub fn needs_growth(&self, additional: u64) -> bool {
@@ -230,12 +262,15 @@ impl MinimizerIndex {
         while ((self.n_entries + additional) as f64) > MAX_LOAD * (BLOCK_SLOTS * n) as f64 {
             n = ((n as f64 * GROWTH).ceil() as usize).max(n + 1);
         }
-        self.rebuild(n, remin);
+        self.rebuild(n, &remin);
     }
 
     /// Re-place every entry into `n` buckets without holding the old and new
     /// blocks at the same time (see the module documentation).
-    fn rebuild<F: Fn(PieceId, u32) -> u64>(&mut self, n: usize, remin: F) {
+    /// (Not generic: one copy for every caller's `remin`, so the rare
+    /// rebuilds do not change how the hot insertion path is compiled.)
+    #[inline(never)]
+    fn rebuild(&mut self, n: usize, remin: &dyn Fn(PieceId, u32) -> u64) {
         let n_entries = self.n_entries;
         let old_overflow = self.overflow_blocks().saturating_sub(self.orphans);
         // 1. Write (piece_id, q) of every reachable entry, then free the blocks.
@@ -243,7 +278,7 @@ impl MinimizerIndex {
         for b in 0..self.n_buckets {
             for blk in self.chain(b) {
                 for i in 0..blk.len as usize {
-                    sink.push(blk.pids[i], blk.qs[i]);
+                    sink.push(blk.pids[i], blk.q(i));
                 }
             }
         }
@@ -281,7 +316,7 @@ impl MinimizerIndex {
         if n >= self.n_buckets {
             return false;
         }
-        self.rebuild(n, remin);
+        self.rebuild(n, &remin);
         true
     }
 
@@ -417,11 +452,12 @@ impl MinimizerIndex {
             let blk = &mut self.blocks[cur as usize];
             let mut i = 0;
             while i < blk.len as usize {
-                if blk.tags[i] == tag && blk.pids[i] == pid && blk.qs[i] == q {
+                if blk.tags[i] == tag && blk.pids[i] == pid && blk.q(i) == q {
                     let last = blk.len as usize - 1;
                     blk.tags[i] = blk.tags[last];
                     blk.pids[i] = blk.pids[last];
-                    blk.qs[i] = blk.qs[last];
+                    let ql = blk.q(last);
+                    blk.set_q(i, ql);
                     blk.len -= 1;
                     n += 1;
                 } else {
@@ -459,9 +495,9 @@ impl MinimizerIndex {
             while cur != NIL {
                 let blk = &mut self.blocks[cur as usize];
                 for i in 0..blk.len as usize {
-                    if blk.tags[i] == s.tag && blk.pids[i] == piece_id && blk.qs[i] == q {
+                    if blk.tags[i] == s.tag && blk.pids[i] == piece_id && blk.q(i) == q {
                         blk.pids[i] = new_piece;
-                        blk.qs[i] = new_q;
+                        blk.set_q(i, new_q);
                         return true;
                     }
                 }
@@ -578,7 +614,7 @@ impl MinimizerIndex {
         loop {
             let blk = &self.blocks[cur];
             for i in 0..blk.len as usize {
-                let e = (blk.tags[i], blk.pids[i], blk.qs[i]);
+                let e = (blk.tags[i], blk.pids[i], blk.q(i));
                 if e.0 == tag && remin(e.1, e.2) == m {
                     drained.push((e.1, e.2));
                 } else {
@@ -655,7 +691,7 @@ impl MinimizerIndex {
             for i in 0..n {
                 if blk.tags[i] == tag {
                     trace.tag_matches += 1;
-                    if f(blk.pids[i], blk.qs[i]) {
+                    if f(blk.pids[i], blk.q(i)) {
                         return true;
                     }
                 }
@@ -722,7 +758,7 @@ impl MinimizerIndex {
                         Entry {
                             tag: blk.tags[i],
                             piece_id: blk.pids[i],
-                            q: blk.qs[i],
+                            q: blk.q(i),
                         },
                     )
                 })
@@ -854,7 +890,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_is_80_bytes() {
-        assert_eq!(BLOCK_BYTES, 80);
+    fn block_is_one_cache_line() {
+        assert_eq!(BLOCK_BYTES, 64);
+        assert_eq!(std::mem::align_of::<Block>(), 64);
+    }
+
+    #[test]
+    fn three_byte_offsets_round_trip() {
+        let mut b = EMPTY;
+        for (i, q) in [
+            0,
+            1,
+            255,
+            256,
+            65535,
+            65536,
+            MAX_Q - 1,
+            MAX_Q,
+            12345,
+            1 << 23,
+        ]
+        .into_iter()
+        .take(BLOCK_SLOTS)
+        .enumerate()
+        {
+            b.push(i as u8, 1000 + i as u32, q);
+            assert_eq!(b.q(i), q);
+        }
+        assert_eq!(b.len as usize, BLOCK_SLOTS);
+        assert_eq!(b.pids[BLOCK_SLOTS - 1], 1000 + BLOCK_SLOTS as u32 - 1);
     }
 }

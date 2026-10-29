@@ -561,7 +561,26 @@ fn main() {
             q.neg[s..e].iter().filter(|&&x| b.table.contains(x)).count() as u64
         });
         assert_eq!(hp as usize, q.pos.len(), "positive query missed");
-        locked.push((th, rate(q.pos.len(), dp), rate(q.neg.len(), dn)));
+        let (hs, ds) = parallel_count(q.seqs.len(), th, |s, e| {
+            let mut sq = b.table.query_stream();
+            let mut h = 0u64;
+            for r in &q.seqs[s..e] {
+                sq.push(r, |_, p| h += p as u64);
+                sq.end();
+            }
+            h
+        });
+        assert_eq!(
+            hs as usize,
+            q.seq_kmers - count_invalid(&q.seqs, a.cfg.k),
+            "concurrent streaming missed"
+        );
+        locked.push((
+            th,
+            rate(q.pos.len(), dp),
+            rate(q.neg.len(), dn),
+            rate(q.seq_kmers, ds),
+        ));
         let t1 = Instant::now();
         let mt = b.table.into_table();
         let conv = t1.elapsed();
@@ -597,7 +616,7 @@ fn main() {
     }
 
     println!("\n-- thread scaling: queries (M queries/s; KmerTable is lock-free, ConcurrentKmerTable takes shard read locks) --");
-    println!("threads | KmerTable positive | random | streaming | Concurrent positive | random");
+    println!("threads | KmerTable positive | random | streaming | Concurrent positive | random | streaming");
     let mut sq_hits = 0;
     for (i, &th) in a.threads.iter().enumerate() {
         let (hp, dp) = parallel_count(q.pos.len(), th, |s, e| {
@@ -617,14 +636,15 @@ fn main() {
         });
         assert_eq!(hp as usize, q.pos.len(), "positive query missed");
         sq_hits = hs;
-        let (_, lp, ln) = locked[i];
+        let (_, lp, ln, ls) = locked[i];
         println!(
-            "{th:7} | {:18.2} | {:6.2} | {:9.2} | {:19.2} | {:6.2}",
+            "{th:7} | {:18.2} | {:6.2} | {:9.2} | {:19.2} | {:6.2} | {:9.2}",
             rate(q.pos.len(), dp),
             rate(q.neg.len(), dn),
             rate(q.seq_kmers, ds),
             lp,
-            ln
+            ln,
+            ls
         );
     }
     assert_eq!(

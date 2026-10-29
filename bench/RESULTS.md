@@ -4,6 +4,152 @@ k = 31, ℓ = 17, release build, single thread, 1 M negative queries per run, an
 most 20 M positive queries. Raw outputs are in `results/`. Every run reported
 **0 mismatches** against the `HashSet<u64>` oracle and **0 false positives**.
 
+## Optimization round 2: insertion shortcuts, 64 B blocks, in-place defrag, concurrent streaming (2026-10-29, sandbox, 2 cores)
+
+Against the previous commit on the same machine; `unihash-bench` (one
+thread) and `unihash-scale --capacity --reps 3 --check` (1 and 2 threads).
+Every run: 0 mismatches against the oracle, every concurrent table equal to
+the single-threaded one with an exact index. Synthetic reads:
+`--synthetic 4000000 --reads 400000` (38 M k-mers, 8.1 M distinct, 12×).
+
+| | before | after |
+|---|---|---|
+| `KmerTable` insertion, chr21 / reads (min of 5) | 5.68 / 3.91 s | 5.03 / 2.04 s |
+| `KmerTable` after `shrink_to_fit`, chr21 / E. coli / reads | 2.020 / 1.819 / 2.715 B/k-mer | 1.927 / 1.756 / 2.600 |
+| concurrent insertion, chr21, 1 / 2 threads | 6.73 / 3.46 s | 4.93 / 2.62 s |
+| concurrent insertion, reads, 1 / 2 threads | 5.03 / 2.90 s | 2.30 / 1.35 s |
+| concurrent table (`with_capacity`), chr21 / reads | 2.658 / 2.908 B/k-mer | 2.450 / 2.786 |
+| after `into_table`, chr21 / reads | 2.007 / 2.697 B/k-mer | 1.866 / 2.503 |
+| concurrent deletion (every 4th item), chr21, 1 / 2 threads | 2.75 / 1.36 s | 2.58 / 1.32 s |
+| concurrent `defrag`, chr21 after deletion (every 4th item) | 2.97 s (conversion) | 1.42 s, same pieces |
+| concurrent `defrag_incremental`, same | 1.53 s (conversion) | 0.29 s |
+| concurrent streaming queries, chr21 / reads, 1 thread | (only on `KmerTable`) | 34.3 / 25.2 M k-mers/s |
+
+* **Insertion lookups** (`KmerTable` and `Writer`): hit extension (one base
+  read when the previous k-mer was present) and a candidate cache per
+  minimizer (the bucket is scanned once while successive k-mers share their
+  minimizer; the run's own new entries are added to it). On chr21 4.9 M of
+  the 5.5 M present k-mers are extensions and 30 M of 35 M lookups reuse
+  candidates; on the reads 28.6 M of 38 M k-mers are extensions. The writer
+  re-reads the piece record before extending (deletions shrink pieces) and
+  uses cached candidates only under the shard lock it collected them under.
+  Tests: `tests/m13_insert_lookups.rs`. Of 9 injected faults, 7 fail them
+  (no cache reset between chunks or after a deferred run is indexed, own
+  entries not added, no base check on extension; in the writer: no
+  piece-record check, cache used across lock acquisitions, own entries not
+  added). Two guards are not exercised: the cache reset after a promotion
+  (unreachable today: a hot minimizer is looked up before the cache), and the
+  writer's check that a cursor's bases are the hit's, which matters only if
+  the piece is emptied and its id reused between the lookup and the cursor.
+* **64 B index blocks** (7 entries, 3-byte offsets, one aligned cache line):
+  per slot 9.1 B instead of 10 B (−8.6 %). On one input, though, the size is
+  set by where its entry count falls between two ×1.5 growth steps (heads
+  57–85 % full), and 7 slots per block move those steps: over 40 genome sizes
+  (`--synthetic`, 2–8 Mbp, 3.5 % apart, both builds with the insertion
+  shortcuts) the 64 B index is 20 % smaller for 26 sizes and 20 % larger for
+  14, −6.0 % on average (whole table −5.4 %). chr21 and the read set fall on
+  the larger side (index +19 %). So `shrink_to_fit` now re-sizes an index to
+  ≈ 80 % when that saves 1/16 of its heads (0.81 s on chr21, 2.30 →
+  1.93 B/k-mer), and `into_table` sizes the merged index for its exact entry
+  count; the table above is after these. Query speed showed no consistent
+  change (within this machine's ±15 % noise between runs). A ×1.25 growth
+  factor was tried instead, to narrow the 57–85 % range: chr21 insertion
+  5.0 → 6.8 s (twice as many re-placements), not kept.
+* **In-place defragmentation of `ConcurrentKmerTable`**: `defrag` plans the
+  same chains as `KmerTable::defrag` (shared code), writes them into a new
+  segmented base array, and re-indexes every piece from all cores into shards
+  sized for 80 % load; hot minimizers stay hot. `defrag_incremental` rewrites
+  the base array without dead bases (ids and index entries unchanged), drops
+  index orphans, and re-sizes shards that would save 1/16 of their heads at
+  80 % load (all cores). Tests (`tests/m14_concurrent_defrag.rs`): the same
+  pieces as through a conversion, base by base, then concurrent writers and
+  deleters on the defragmented table; 7 injected faults (overlap copied twice,
+  reverse complement, word-copy offset, hot marks, frontier, stale chunk tails,
+  shared bases) all caught. `defrag_incremental` leaves the table 3 % larger
+  than the conversion did (2.32 vs 2.26 B/k-mer on chr21) for 5× less time;
+  after `defrag` 2.24 vs 2.22.
+* **`ConcurrentStreamingQuery`** (`ConcurrentKmerTable::query_stream`): hit
+  extension with the piece record re-read, candidates cached while it holds the
+  minimizer's shard read lock without interruption (within one `push`), the
+  answers of a chunk handed to the callback after the lock is released (so it
+  may insert into the table). 61–102 % of `KmerTable`'s streaming speed
+  (chr21, 1 / 2 threads: 34 / 42 vs 46 / 69 M k-mers/s; reads: 25 / 37 vs
+  25 / 45), 13–28× the rate of independent concurrent lookups of positives.
+  Tests (`tests/m15_concurrent_stream.rs`):
+  equal to `contains` in every configuration, exact across inserts, deletions
+  and defragmentation between pushes, readers during insertion and deletion,
+  a writing callback; dropping the cache reset on release or the
+  piece-record check fails them, calling back under the lock deadlocks
+  (caught by the 300 s timeout).
+* Found on the way: adding a generic call of the index rebuild (in
+  `shrink_to_fit`) changed how LLVM compiled the insertion path and cost 15 %
+  of chr21 insertion, although the new code ran after it. The rebuild is now
+  one non-generic, never-inlined function taking `&dyn Fn`.
+
+## Index reads without locks: tried, not kept (2026-10-29)
+
+A version of the concurrent table whose queries and deletion lookups read the
+index shards without locks was built and measured, then dropped. Shards held
+the single-threaded block layout in atomic words; additions were published by
+a release store of the block length, other changes ran under a per-shard
+seqlock, and grown shards were swapped in with `arc-swap`.
+
+* **Cost per lookup.** In safe Rust the reader reaches the blocks through
+  `arc-swap` → a storage header → the blocks: one more dependent memory access
+  than the read lock's word → blocks (an uncontended `arc-swap` load costs the
+  same 15 ns as an uncontended read lock). On 2 cores, random positive queries
+  were 20–23 % slower with 1 thread (chr21 1.38 → 1.06 M/s, synthetic reads
+  2.21 → 1.74) and 17–18 % slower with 2; negative queries were equal or faster
+  (reads, 2 threads: 6.78 → 8.49 M/s); insertion and deletion within noise.
+* **What it could save.** Read locks write the shard's lock word on every
+  lookup; on the laptop that held concurrent queries to 0.89 (chr21) and 0.92
+  (SRR5833294) of `KmerTable` at 8 threads (`results/ab/*_prev.txt`): at most
+  about 10 % to gain, less than the lock-free path costs. The laptop A/B
+  (`results/ab/`) is not conclusive on its own: its baseline predates round 1
+  below, and the machine's speed changed by up to 2× between the runs (same
+  `KmerTable` code: 0.94 vs 1.83 M positive queries/s). In the lock-free run,
+  concurrent queries reached 0.53–0.57 of `KmerTable` at 8 threads.
+* Writers looking k-mers up without the lock first (after a present k-mer):
+  4 % slower on chr21, no gain on reads.
+* Kept: `tests/m12_reader_visibility.rs`. The lock-free version had a race the
+  locks hide (a cut adds its right part's items, then shrinks the old piece; a
+  lookup between the two could miss a surviving k-mer); these tests, which cut
+  a piece from the front one k-mer at a time and make minimizers hot while
+  readers check, caught it and each of three injected faults 10 times out of
+  10. They pass unchanged on the locked table.
+* Two lessons for atomic index blocks, should they come back: store piece ids
+  and offsets as `u32` atomics (writing half of a 64-bit word needs a read of
+  it, a cache miss plain stores never wait for), and use `#[repr(C)]` (the
+  default layout moved the length word to the block's end, onto a second cache
+  line: +8 % insertion time).
+
+## Optimization round 1: parallel conversions, `with_capacity` for reads (2026-10-29, sandbox)
+
+* **`into_table`** recomputed every index entry's minimizer from the pieces and
+  inserted it, one thread, about 320 ns per entry (two random reads in the
+  pieces, two in the new index). Minimizers are now computed by all cores, chunk
+  by chunk, and each chunk's head blocks are read in batches of 32 before
+  inserting (about 20 % faster insertion). **`from_table`** grew every shard
+  from its initial size while filling it, one thread; shards are now sized for
+  their share first and filled by all cores.
+
+  | 2 cores | `into_table` before → after | `from_table` before → after |
+  |---|---|---|
+  | chr21 (4.3 M entries) | 1.05 → 0.69 s | 3.02 → 1.15 s |
+  | synthetic reads (4.8 M entries) | 1.76 → 1.07 s | 4.40 → 1.38 s |
+
+  On chr21 the remaining merge time is 0.27 s of minimizers (all cores) and
+  0.31 s of insertion (one thread, 72 ns per entry).
+* **`with_capacity`** assumed 0.125 index entries per k-mer (2 / (w + 1)); read
+  sets need 0.151 (about one more entry per piece, and pieces are short), so
+  every shard grew once near the end, under its lock, and ended 1.5× too large.
+  It now sizes for 2.5 / (w + 1) at 80 % head load. Synthetic reads (1.6 M):
+  6521 → 2892 shard growths (the rest are tiny layer-2 shards), growth time 1.1
+  → 0.08 s, concurrent table 3.05 → 3.13 B/k-mer. chr21: 2.41 → 2.66 B/k-mer
+  while concurrent (heads at 66 % load); `into_table` gives the same 2.007.
+  One writer is now as fast as `KmerTable` on chr21 (1.01×).
+* New test: conversions large enough to use all cores, both ways, exact.
+
 ## Concurrent insertion and deletion on the laptop (2026-10-28, second run)
 
 `CAPACITY=1 tools/scale.sh` (deletion of every 4th work item after each build).

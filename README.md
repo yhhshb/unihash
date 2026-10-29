@@ -41,8 +41,8 @@ if f.piece_overhead(t.k()) > 0.10 {
 println!("{}", t.stats());
 
 // Many threads: insert concurrently (one Writer per thread) while others
-// delete and query; defragment with &mut; hand the table back to a
-// KmerTable for lock-free queries or streaming queries.
+// delete and query (also as streaming queries); defragment with &mut; hand
+// the table back to a KmerTable for queries without any locking.
 let ct = ConcurrentKmerTable::from_table(t);       // or ::new(cfg)?, or ::with_capacity(cfg, n_kmers)?
 std::thread::scope(|s| {
     for part in reads.chunks(reads.len().div_ceil(8)) {
@@ -54,8 +54,11 @@ std::thread::scope(|s| {
     }
 });
 ct.delete_read(b"ACGTTGCA...");                   // any thread, concurrently with writers
+let mut sq = ct.query_stream();                   // in-order queries, any thread
+sq.push(b"ACGTTGCA...", |x, present| { /* ... */ });
+drop(sq);
 let mut ct = ct;
-ct.defrag_incremental();                          // exclusive (&mut): converts and back
+ct.defrag_incremental();                          // exclusive (&mut), in place
 let t: KmerTable = ct.into_table();               // &KmerTable is Sync: query from any thread
 ```
 
@@ -110,7 +113,7 @@ builds a `ConcurrentKmerTable` with that many writers (items handed out
 dynamically). It reports insertion rate, speed-up over 1 thread and over
 `KmerTable`, heap and peak heap per k-mer, `into_table` time and size; then query
 rates with as many threads, on `KmerTable` (lock-free) and on the concurrent table
-(shard read locks). `--sizes` repeats the builds on growing prefixes of the input;
+(shard read locks), as independent lookups and as streaming queries. `--sizes` repeats the builds on growing prefixes of the input;
 `--check` checks every multi-threaded table against the reference (same k-mers,
 none stored twice, exact index) and exits with status 1 otherwise.
 `--delete-frac F` also times concurrent deletion: after each build, every
@@ -172,7 +175,9 @@ shards (default 1024; layer 2 has n/8, layer 3 has 64). More shards mean fewer
 writers waiting on the same lock, at about 300 B each.
 `ConcurrentKmerTable::with_capacity(cfg, kmers)` sizes the table for an expected
 number of distinct k-mers: `kmers / 8192` shards (256 to 65536) whose indexes
-start large enough not to grow. Prefer it for large inputs whenever the size is
+start large enough not to grow (sized for 2.5 / (w + 1) entries per k-mer at
+80 % head load: about 77 % on read sets, whose short pieces add about one entry
+each, and 66 % on genomes). Prefer it for large inputs whenever the size is
 roughly known (e.g. genome length, or distinct k-mers of a previous run): a shard
 grows under its write lock, and every writer needs every shard about once per
 millisecond, so growth stalls all writers.
@@ -217,6 +222,18 @@ Answers do not depend on the order of insertion.
   skipped. Every maximal run of absent k-mers becomes a piece. When a run reaches
   `max_piece_len` it is closed *before* the next lookup and continues in a new
   piece overlapping by k − 1 bases.
+* **Insertion lookups** take the two shortcuts of streaming queries. *Hit
+  extension*: if the previous k-mer was found, the next one is present exactly
+  when the next stored base (or its complement, for a reverse-complement hit)
+  equals the incoming base; one base read, no index access. *Candidate cache*:
+  the tag-matching entries of a minimizer are collected once and kept while
+  successive k-mers share it; the entries a run files under that minimizer are
+  added to the cache, which is dropped when a minimizer becomes hot, when a
+  deferred run is indexed, and at each `insert_chunk` (the table may have been
+  edited between reads). On chr21 4.9 M of 5.5 M present k-mers are found by
+  extension and 30 M of 35 M lookups reuse candidates; on 12×-covered reads
+  29 M of 38 M k-mers are extensions. Insertion is 1.3× (chr21) to 2.1×
+  (reads) faster.
 * **Eager run indexing** (default, `run_indexing: Eager`). The piece is created
   in the base array at the first absent k-mer of a run and grows by one base per
   further absent k-mer; each k-mer's window is filed in the index (or in layers
@@ -244,6 +261,12 @@ Answers do not depend on the order of insertion.
     in its home shard, so no two writers can both store it. A writer keeps the
     lock while consecutive k-mers share the shard, and releases it at the end of
     each `insert_chunk`.
+  * Writers take the insertion shortcuts too. Hit extension re-reads the piece's
+    record first (a deletion may have shrunk the piece; bases never change), so
+    an extended hit is a k-mer present when the record is read, and needs no
+    lock. Cached candidates are used only while the writer has held the shard's
+    lock without interruption since collecting them, so no other thread changed
+    the shard.
   * A minimizer becomes hot under its layer-1 shard's write lock: its k-mers are
     filed in layer 2 (or 3) first, then it is marked hot and its layer-1 entries
     are dropped, so no lookup misses a k-mer in transit. Hotness is permanent, so
@@ -253,8 +276,11 @@ Answers do not depend on the order of insertion.
     layer 2 → layer 3 and a writer holds at most one shard lock between k-mers,
     so there is no deadlock.
   * `into_table` copies the bases, slides out unused chunk space and merges the
-    shards (entries are re-inserted in a scattered order so two-choice placement
-    stays balanced); `from_table` splits an index into shards.
+    shards: their entries are listed, their minimizers recomputed from the pieces
+    by all cores chunk by chunk, and each chunk inserted in a scattered order (so
+    two-choice placement stays balanced), its head blocks read in batches of 32
+    first so the CPU fetches them in parallel. `from_table` sizes every shard for
+    its share of the entries and fills the shards from all cores.
 * **Concurrent deletion** (`src/concurrent_delete.rs`). A cut makes the same
   pieces as `KmerTable`'s, in an order that keeps every surviving k-mer findable:
   1. the right part is published under a *new* id and its index items are added
@@ -285,10 +311,12 @@ Answers do not depend on the order of insertion.
   start, 24-bit length), so the cost is still 8 B per piece. Any k-mer (k ≤ 32)
   is read with two word loads and one shift, wherever it falls relative to word
   boundaries.
-* **Index**. The index is one flat array of fixed-capacity 80 B blocks. Each block
-  holds 8 entries as separate arrays of 8 tags, 8 piece ids and 8 offsets (9 B per
-  entry), plus a fill count and an overflow link. There are no per-bucket
-  allocations or headers.
+* **Index**. The index is one flat array of fixed-capacity 64 B blocks, each one
+  aligned cache line. Each block holds 7 entries as separate arrays of 7 tags, 7
+  piece ids (4 B) and 7 offsets (3 B; offsets are below 2^24 like piece
+  lengths), so 8 B per entry, plus a fill count, flags and an overflow link.
+  There are no per-bucket allocations or headers. A slot costs 64 / 7 ≈ 9.1 B
+  (80 / 8 = 10 B with the previous 80 B blocks of 8 entries).
   * **Placement.** Each minimizer has two candidate buckets, and a new entry goes
     to the less-full head ("two choices"). When both heads are full, the entry
     goes to an overflow chain.
@@ -302,6 +330,12 @@ Answers do not depend on the order of insertion.
     records streamed back in. The spill file is deleted after each rebuild.
   * **Compaction.** After growth and in `shrink_to_fit`, overflow chains are laid
     out contiguously. Heads stay in place; only the overflow area is copied.
+  * **Final size.** Growing by 1.5× leaves the heads anywhere between 57 and
+    85 % full when loading stops, depending only on where the entry count falls
+    between two growth steps. `shrink_to_fit` re-sizes an index to ≈ 80 % when
+    that saves at least 1/16 of its heads (one re-placement of its entries,
+    0.8 s on chr21); `into_table` and `defrag` size the index for its exact
+    entry count.
 * **Hot minimizers** (three layers). Repeats (Alu, homopolymers, satellites) give
   some minimizers thousands of entries, and every query on such a k-mer would scan
   all of them.
@@ -405,7 +439,9 @@ src/table.rs          KmerTable: insert_read / insert_chunk / end_read / contain
                       layer-2 / layer-3 routing, eager and deferred run indexing
 src/concurrent.rs     ConcurrentKmerTable and Writer: sharded index layers, writer
                       chunks, from_table / into_table
-src/concurrent_delete.rs  concurrent delete_read / delete, defrag wrappers
+src/concurrent_delete.rs  concurrent delete_read / delete
+src/concurrent_defrag.rs  defrag / defrag_incremental of the concurrent table, in place
+src/concurrent_stream.rs  ConcurrentStreamingQuery
 src/seg.rs            segmented array of atomics with stable addresses
 src/edit.rs           delete_read / delete (piece cuts), defrag, defrag_incremental,
                       fragmentation, verify_index
@@ -425,6 +461,14 @@ tests/m10_concurrent.rs   concurrent insertion and queries, conversions, edits
                           (UNIHASH_STRESS=N repeats the multi-threaded tests)
 tests/m11_concurrent_delete.rs  concurrent deletion racing writers, readers and
                           other deleters; open runs; defrag between phases
+tests/m12_reader_visibility.rs  readers while cuts move k-mers to new piece ids and
+                          while minimizers become hot
+tests/m13_insert_lookups.rs  insertion shortcuts (hit extension, candidate cache):
+                          oracle, edits between reads, concurrent writers
+tests/m14_concurrent_defrag.rs  in-place defragmentation of the concurrent table:
+                          same pieces as through a conversion, then concurrent use
+tests/m15_concurrent_stream.rs  ConcurrentStreamingQuery: equal to contains, changes
+                          between and during pushes, writing callbacks
 tools/              ci.sh, fetch_data.sh, bench_real.sh, kache_compare.sh, churn_real.sh,
                     eager_compare.sh, scale.sh
 tools/kache/        kache_bench.cpp (kache-hash driver), summarize.py
@@ -459,22 +503,30 @@ tools/kache/        kache_bench.cpp (kache-hash driver), summarize.py
 
 ## Known limits
 
-* Defragmentation of a `ConcurrentKmerTable` is exclusive and converts to a
-  `KmerTable` and back (O(table), a few seconds on SRR5833294). `StreamingQuery`
-  exists only on `KmerTable`. While deletions run, minimizers do not become hot
+* Defragmentation of a `ConcurrentKmerTable` is exclusive (`&mut`), done in
+  place: `defrag` re-indexes every piece (all cores; 1.6 s on chr21 after
+  deleting a quarter of it), `defrag_incremental` only rewrites the base array
+  and re-sizes shards (0.3 s). While deletions run, minimizers do not become hot
   (promotions are retried later).
+* A `ConcurrentStreamingQuery` keeps a shard's read lock while successive
+  k-mers share a minimizer (within one `push`), so writers to that shard wait
+  meanwhile; its callback runs after the chunk, with no lock held. It runs at
+  65–80 % of `KmerTable`'s streaming speed (each extension re-reads the piece
+  record).
 * Writers hold a shard's write lock for each lookup-and-append (and across
   consecutive k-mers of the same shard). Because each writer needs every shard
   about once per millisecond, a lock holder that is slow (index growth) or
   preempted by the OS stalls the other writers: with more threads than idle
   logical cores, or with large tables that grow without `with_capacity`,
-  insertion stops scaling (see `bench/RESULTS.md`). Lock-free lookups would
-  remove most of this.
-* One writer of `ConcurrentKmerTable` is 15–25 % slower than `KmerTable`
-  (lock per run of k-mers sharing a shard, atomic piece records, segmented
-  base array); the table itself is up to 15 % larger until `into_table` (1024
-  shards' fixed costs and slack), but its peak during insertion is lower because
-  shards grow one at a time.
+  insertion stops scaling (see `bench/RESULTS.md`). Index reads without locks
+  were tried and dropped: in safe Rust they cost about 20 % per lookup, more
+  than read locks lose at 8 threads (`bench/RESULTS.md`).
+* One writer of `ConcurrentKmerTable` sized with `with_capacity` is as fast as
+  `KmerTable` (1.01× on chr21 and on reads); without it, shards grow under
+  their locks and it is 15–25 % slower. The table is 7–27 % larger than a
+  `KmerTable` after `shrink_to_fit` until `into_table` (shards' fixed costs and
+  slack), but its peak during insertion is lower because shards grow one at a
+  time.
 * Deletion leaves dead bases and extra pieces until `defrag` is called; `defrag`
   is O(table) and briefly holds the old and new base arrays (the indexes are
   freed before rebuilding).
