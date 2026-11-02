@@ -5,6 +5,7 @@
 # Environment overrides: K (31), L (17), MAX_READS (records per read set,
 # default 2000000 — remove the cap with MAX_READS=0, which also disables the
 # held-out query set).
+# RESULTS_DIR (default bench/results) redirects every output of this script.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release --quiet
@@ -12,12 +13,13 @@ B=./target/release/unihash-bench
 K=${K:-31}
 L=${L:-17}
 MAX_READS=${MAX_READS:-2000000}
-mkdir -p bench/results
+R=${RESULTS_DIR:-bench/results}
+mkdir -p "$R"
 
 run() { # name args...
     local name=$1; shift
     echo "== $name: $*"
-    "$B" --k "$K" --l "$L" "$@" | tee "bench/results/$name.txt" \
+    "$B" --k "$K" --l "$L" "$@" | tee "$R/$name.txt" \
         | grep -E "^-- |^(table|oracle)  |^(kmers|seq)-|^workload|answered by extension|table total|table heap|heap peak|^RSS|oracle HashSet|MISMATCH|FALSE|peak RSS"
 }
 

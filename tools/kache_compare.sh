@@ -5,6 +5,10 @@
 #
 #   bash tools/kache_compare.sh                 # E. coli, chr21, SRR5833294 (as bench_real.sh)
 #   bash tools/kache_compare.sh NAME ARGS...    # one single-threaded run: NAME + unihash-bench arguments
+#   bash tools/kache_compare.sh --setup         # only fetch and build kache-hash and its drivers
+#
+# kache-hash is cloned into external/kache-hash (pinned commit) and the drivers
+# are built into external/bin/; external/ is not part of the repository.
 #
 # Two comparisons per data set.
 #
@@ -16,7 +20,7 @@
 #      k = 31, ℓ = 17) from the same input files, runs the same workloads, and
 #      checks its answers against the expected hit counts.
 #   3. tools/kache/summarize.py prints a side-by-side table.
-# Outputs: bench/results/kache/<NAME>_{unihash,kache,summary}.{txt,md}
+# Outputs: $RESULTS_DIR/kache/<NAME>_{unihash,kache,summary}.{txt,md}
 #
 # Thread scaling (single-threaded and concurrent versions of each structure):
 #   1. unihash-scale --hashset builds KmerTable and std HashSet<u64> on one
@@ -30,14 +34,15 @@
 #      thread, created for the distinct k-mers) built with each thread count.
 #      Every size and answer is checked against unihash's.
 #   3. tools/kache/summarize_scale.py prints the tables.
-# Outputs: bench/results/kache/<NAME>_scale_{unihash,kache,summary}.{txt,md}
+# Outputs: $RESULTS_DIR/kache/<NAME>_scale_{unihash,kache,summary}.{txt,md}
 #
 # Environment: CXX (g++), KACHE_INIT_CAP (1048576), MAX_READS (2000000),
 # DUMP_ROOT (target/kache-dump), KEEP_DUMP=1 to keep the dumps; SINGLE=0 or
 # SCALE=0 to skip a comparison; THREADS (default: powers of two up to the
 # core count, and the core count) and REPS (median of N builds, default 3)
 # for the scaling comparison; DATA (comma-separated subset of
-# ecoli,chr21,SRR5833294; default all available).
+# ecoli,chr21,SRR5833294; default all available); RESULTS_DIR (default
+# bench/results).
 #
 # Build note: kache-hash miscompiles with GCC -O3 unless strict aliasing is
 # disabled (its answers become wrong: streaming queries find ~1 % of present
@@ -53,27 +58,50 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KACHE_COMMIT=f7cfa5be4bcd28ffa061588c7c80445cbd5690d0
-KDIR=third_party/kache-hash
-if [[ ! -d "$KDIR/.git" ]]; then
-    mkdir -p third_party
-    git clone --quiet https://github.com/jamshed/kache-hash "$KDIR"
+KDIR=external/kache-hash
+BIN=external/bin
+CXX=${CXX:-g++}
+
+setup_kache() {
+    if [[ ! -d "$KDIR/.git" ]]; then
+        mkdir -p external
+        echo "cloning kache-hash into $KDIR"
+        git clone --quiet https://github.com/jamshed/kache-hash "$KDIR"
+    fi
+    if [[ "$(git -C "$KDIR" rev-parse HEAD)" != "$KACHE_COMMIT" ]]; then
+        git -C "$KDIR" fetch --quiet origin || true
+        git -C "$KDIR" checkout --quiet "$KACHE_COMMIT"
+    fi
+    mkdir -p "$BIN"
+    local L1
+    L1=$(getconf LEVEL1_DCACHE_LINESIZE 2>/dev/null || echo 64)
+    [[ "$L1" =~ ^[0-9]+$ && "$L1" -gt 0 ]] || L1=64
+    # Rebuild when the driver or the pinned commit changed (-march=native:
+    # binaries copied from another machine are rebuilt too).
+    local stamp="$BIN/.kache-build"
+    local want host
+    host=$(uname -n)
+    want="$KACHE_COMMIT $CXX L1=$L1 $host"
+    for tool in kache_bench kache_scale; do
+        if [[ ! "$BIN/$tool" -nt tools/kache/$tool.cpp || "$(cat "$stamp" 2>/dev/null)" != "$want" ]]; then
+            echo "building $BIN/$tool with $CXX"
+            "$CXX" -std=c++20 -O3 -funroll-loops -march=native -fno-strict-aliasing -Wno-invalid-memory-model \
+                -DNDEBUG -DQUIET \
+                -DXXH_INLINE_ALL -DXXH_STATIC_LINKING_ONLY -DL1_CACHE_LINE_SIZE="$L1" \
+                -I "$KDIR/include" tools/kache/$tool.cpp -o "$BIN/$tool" -lz -lpthread
+        fi
+    done
+    echo "$want" > "$stamp"
+}
+
+setup_kache
+if [[ "${1:-}" == "--setup" ]]; then
+    exit 0
 fi
-git -C "$KDIR" checkout --quiet "$KACHE_COMMIT"
 
 cargo build --release --quiet
-mkdir -p target bench/results/kache
-CXX=${CXX:-g++}
-L1=$(getconf LEVEL1_DCACHE_LINESIZE 2>/dev/null || echo 64)
-[[ "$L1" =~ ^[0-9]+$ && "$L1" -gt 0 ]] || L1=64
-for tool in kache_bench kache_scale; do
-    if [[ ! target/$tool -nt tools/kache/$tool.cpp ]]; then
-        echo "building target/$tool with $CXX"
-        "$CXX" -std=c++20 -O3 -funroll-loops -march=native -fno-strict-aliasing -Wno-invalid-memory-model \
-            -DNDEBUG -DQUIET \
-            -DXXH_INLINE_ALL -DXXH_STATIC_LINKING_ONLY -DL1_CACHE_LINE_SIZE="$L1" \
-            -I "$KDIR/include" tools/kache/$tool.cpp -o target/$tool -lz -lpthread
-    fi
-done
+RES=${RESULTS_DIR:-bench/results}
+mkdir -p target "$RES/kache"
 
 DUMP_ROOT=${DUMP_ROOT:-target/kache-dump}
 KACHE_INIT_CAP=${KACHE_INIT_CAP:-1048576}
@@ -81,12 +109,12 @@ KACHE_INIT_CAP=${KACHE_INIT_CAP:-1048576}
 run() { # name unihash-bench-args...
     local name=$1; shift
     local dump="$DUMP_ROOT/$name"
-    local out=bench/results/kache/$name
+    local out=$RES/kache/$name
     rm -rf "$dump"
     echo "== $name: unihash-bench $*"
     ./target/release/unihash-bench "$@" --dump "$dump" > "${out}_unihash.txt"
     echo "== $name: kache-hash"
-    ./target/kache_bench "$dump" "$KACHE_INIT_CAP" > "${out}_kache.txt" || {
+    "$BIN/kache_bench" "$dump" "$KACHE_INIT_CAP" > "${out}_kache.txt" || {
         cat "${out}_kache.txt"; echo "kache-hash run failed or disagreed with the oracle" >&2; exit 1; }
     python3 tools/kache/summarize.py "${out}_unihash.txt" "${out}_kache.txt" | tee "${out}_summary.md"
     [[ "${KEEP_DUMP:-0}" == "1" ]] || rm -rf "$dump"
@@ -96,7 +124,7 @@ REPS=${REPS:-3}
 scale() { # name unihash-scale-input-args...
     local name=$1; shift
     local dump="$DUMP_ROOT/${name}_scale"
-    local out=bench/results/kache/${name}_scale
+    local out=$RES/kache/${name}_scale
     local thr=()
     [[ -n "${THREADS:-}" ]] && thr=(--threads "$THREADS")
     rm -rf "$dump"
@@ -105,7 +133,7 @@ scale() { # name unihash-scale-input-args...
         --dump "$dump" > "${out}_unihash.txt" || {
         cat "${out}_unihash.txt"; echo "unihash-scale failed" >&2; exit 1; }
     echo "== $name, thread scaling: kache-hash"
-    ./target/kache_scale "$dump" "$KACHE_INIT_CAP" > "${out}_kache.txt" || {
+    "$BIN/kache_scale" "$dump" "$KACHE_INIT_CAP" > "${out}_kache.txt" || {
         cat "${out}_kache.txt"; echo "kache-hash run failed or disagreed with unihash" >&2; exit 1; }
     python3 tools/kache/summarize_scale.py "${out}_unihash.txt" "${out}_kache.txt" | tee "${out}_summary.md"
     [[ "${KEEP_DUMP:-0}" == "1" ]] || rm -rf "$dump"

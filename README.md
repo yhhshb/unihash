@@ -90,9 +90,23 @@ bash tools/kache_compare.sh         # same workloads on kache-hash → bench/res
 bash tools/churn_real.sh            # deletion/re-insertion churn × defrag policies → bench/results/churn/
 bash tools/eager_compare.sh         # deferred vs eager run indexing → bench/results/eager/
 bash tools/scale.sh                 # thread and input-size scaling → bench/results/scale/
+bash tools/paper_runs.sh            # everything below in one run → bench/results/<host>-<date>/
 cargo run --release --bin unihash-scale -- --synthetic-repeats 5000000 --reads 400000 --check
 cargo run --release --bin unihash-churn -- --synthetic-repeats 1000000 --check
 ```
+
+`tools/paper_runs.sh` reproduces every measurement of the paper on the current
+machine: it checks the build tools (installing a private Rust toolchain into
+`external/rust` if `cargo` is missing), downloads the data with
+`fetch_data.sh --reads` when it is missing, builds kache-hash and its drivers
+into `external/`, records the machine (CPU, memory, governor, compilers,
+commit) in `machine.txt`, then runs the tests, the kache-hash comparison,
+`scale.sh` (with capacity and deletion), `eager_compare.sh`, the ablations, the
+defragmentation runs and `churn_real.sh` (checked), and writes `SUMMARY.md`.
+Completed steps are skipped when the script is restarted (`FORCE=1` re-runs
+them; `STEPS=kache,scale` selects steps). The other scripts write to
+`$RESULTS_DIR` (default `bench/results`). `data/` and `external/` are not part
+of the repository.
 
 **Churn benchmark.** `unihash-churn` builds a table, then repeats "delete one
 unit (a `--unit`-base window, or a whole read), re-insert the unit deleted
@@ -122,7 +136,7 @@ none stored twice, exact index) and exits with status 1 otherwise.
 
 **kache-hash comparison.** `tools/kache_compare.sh` clones
 [kache-hash](https://github.com/jamshed/kache-hash) (pinned commit) into
-`third_party/`, builds `tools/kache/kache_bench.cpp` against it (g++ ≥ 11, zlib,
+`external/kache-hash`, builds `tools/kache/kache_bench.cpp` against it into `external/bin/` (g++ ≥ 11, zlib,
 AVX2), and for each data set runs `unihash-bench --dump DIR`, then `kache_bench DIR`
 on the same inputs and the same query k-mers, then prints a side-by-side table
 (`tools/kache/summarize.py`). kache-hash is built single-threaded with the same
@@ -494,7 +508,7 @@ tests/m14_concurrent_defrag.rs  in-place defragmentation of the concurrent table
 tests/m15_concurrent_stream.rs  ConcurrentStreamingQuery: equal to contains, changes
                           between and during pushes, writing callbacks
 tools/              ci.sh, fetch_data.sh, bench_real.sh, kache_compare.sh, churn_real.sh,
-                    eager_compare.sh, scale.sh
+                    eager_compare.sh, scale.sh, paper_runs.sh (all paper measurements)
 tools/kache/        kache_bench.cpp, kache_scale.cpp (kache-hash drivers: single-threaded,
                     thread scaling), summarize.py, summarize_scale.py
 ```

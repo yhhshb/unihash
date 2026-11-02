@@ -11,13 +11,15 @@
 #                     full defrag() when piece_overhead(k) > Y
 #
 # Environment: MAX_READS (records of the read set, default 2000000),
-# CHECK=1 to verify every policy against the HashSet oracle (slower).
+# CHECK=1 to verify every policy against the HashSet oracle (slower),
+# RESULTS_DIR (default bench/results; outputs go to its churn/ subfolder).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release --quiet
 C=./target/release/unihash-churn
 MAX_READS=${MAX_READS:-2000000}
-mkdir -p bench/results/churn
+out=${RESULTS_DIR:-bench/results}/churn
+mkdir -p "$out"
 P=(--policy never --policy overhead:0.1 --policy inc:0.02+full:0.05 --policy inc:0.02+full:0.1 --policy inc:0.05+full:0.2)
 chk=()
 [[ "${CHECK:-0}" == "1" ]] && chk=(--check)
@@ -25,7 +27,7 @@ chk=()
 run() { # name args...
     local name=$1; shift
     echo "== $name: $*"
-    "$C" "$@" "${P[@]}" "${chk[@]}" | tee "bench/results/churn/$name.txt"
+    "$C" "$@" "${P[@]}" "${chk[@]}" | tee "$out/$name.txt"
 }
 
 if [[ -s data/ecoli_NC_000913.3.fa ]]; then

@@ -23,5 +23,8 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Benchmark inputs (tools/fetch_data.sh) and third-party tools built by
+# tools/kache_compare.sh --setup / tools/paper_runs.sh; rebuilt by the scripts.
 data/
+external/
 third_party/

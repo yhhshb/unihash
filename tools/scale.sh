@@ -14,7 +14,8 @@
 # the concurrent tables with with_capacity (results in
 # bench/results/scale/<data>_capacity.txt), DELETE (fraction of the work
 # items deleted concurrently after each build, default 0.25; 0 = off), EXTRA
-# (more unihash-scale options, e.g. "--shards 8192").
+# (more unihash-scale options, e.g. "--shards 8192"), RESULTS_DIR (default
+# bench/results; outputs go to its scale/ subfolder).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release --quiet
@@ -22,7 +23,7 @@ S=./target/release/unihash-scale
 REPS=${REPS:-3}
 SIZES=${SIZES:-0.125,0.25,0.5,1}
 MAX_READS=${MAX_READS:-2000000}
-out=bench/results/scale
+out=${RESULTS_DIR:-bench/results}/scale
 mkdir -p "$out"
 thr=()
 [[ -n "${THREADS:-}" ]] && thr=(--threads "$THREADS")

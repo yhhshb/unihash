@@ -4,14 +4,15 @@
 # Full outputs: bench/results/eager/<data>_<mode>_<rep>.txt; summary on stdout.
 #
 # Environment: REPS (default 3), MAX_READS (records of the read set,
-# default 2000000).
+# default 2000000), RESULTS_DIR (default bench/results; outputs go to its
+# eager/ subfolder).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release --quiet
 B=./target/release/unihash-bench
 REPS=${REPS:-3}
 MAX_READS=${MAX_READS:-2000000}
-out=bench/results/eager
+out=${RESULTS_DIR:-bench/results}/eager
 mkdir -p "$out"
 
 sets=()
