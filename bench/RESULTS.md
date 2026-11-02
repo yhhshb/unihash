@@ -4,6 +4,140 @@ k = 31, ℓ = 17, release build, single thread, 1 M negative queries per run, an
 most 20 M positive queries. Raw outputs are in `results/`. Every run reported
 **0 mismatches** against the `HashSet<u64>` oracle and **0 false positives**.
 
+## kache-hash and HashSet comparison on the laptop (2026-10-30)
+
+`bash tools/kache_compare.sh` (REPS 3, 1/2/4/8 threads); raw output and
+summaries in `bench/results/kache/`. Every kache-hash answer and every
+structure's size equalled unihash's.
+
+**Single-threaded comparison** (`*_summary.md`), as ratios against the
+2026-10-24 run on the same laptop (ratios cancel the machine's speed drift;
+absolute rates of all three structures were ~10 % lower on E. coli in this
+run):
+
+| | E. coli | chr21 | SRR5833294 |
+|---|---|---|---|
+| memory, unihash B/k-mer | 1.82 → 1.76 | 2.02 → 1.93 | 3.05 → 2.51 |
+| memory, kache-hash ÷ unihash | 12.3 → 12.7× | 11.6 → 12.2× | 6.7 → 8.1× |
+| memory, HashSet ÷ unihash | 9.1 → 9.4× | 8.6 → 9.0× | 4.9 → 6.0× |
+| insertion, unihash ÷ kache-hash | 1.26 → 1.17 | 0.93 → 1.03 | 0.65 → 0.76 |
+| random-order positives, unihash ÷ kache-hash | 1.69 → 2.02 | 1.00 → 1.21 | 1.03 → 1.05 |
+| streaming positives, unihash ÷ kache-hash | 2.65 → 3.11 | 2.23 → 2.36 | 1.93 → 1.95 |
+| random negatives, unihash ÷ kache-hash | 2.03 → 2.18 | 1.65 → 1.63 | 1.77 → 1.72 |
+
+SRR held-out reads (20 % hits) streaming stays 0.88× kache-hash, the
+low-hit SRR5901135 query sets 1.01× / 0.98×. `HashSet<u64>` remains 2–4×
+faster than unihash for independent lookups and 7–11× slower for streaming.
+
+**Thread scaling** (`*_scale_summary.md`), first run. Memory is
+deterministic: unihash 1.75 / 1.93 / 2.51 B/k-mer single-threaded, 2.17 /
+2.45 / 2.80 concurrent, 1.70 / 1.87 / 2.43 after `into_table`; kache-hash
+22.3 / 23.5 / 20.3 and `HashSet` 16.6 / 17.4 / 15.1 for both versions.
+Insertion, M k-mers/s:
+
+| threads | E. coli: unihash / kache / HashSet | chr21 | SRR5833294 |
+|---|---|---|---|
+| 1, single-threaded (grows) | 9.6 / 7.6 / 8.0 | 5.7 / 5.5 / 5.6 | 3.8 / 5.7 / 4.6 |
+| 1, concurrent (pre-sized) | 11.1 / 13.7 / 9.1 | 5.9 / 10.5 / 6.2 | 5.6 / 9.3 / 6.0 |
+| 8, concurrent (pre-sized) | 52.1 / 55.7 / 29.7 | 22.7 / 35.1 / 19.4 | 24.8 / 35.6 / 18.9 |
+
+* The machine was not steady: in the queries, some rows scale impossibly
+  (chr21 `HashSet` positives 3.97 / 6.56 / 25.5 M/s at 1 / 2 / 4 threads,
+  `ConcurrentKmerTable` 1.18 → 1.59 at 1 → 2 threads), and unihash's
+  concurrent insertion was slower than in the A/B run two hours earlier on
+  the same code (chr21 8 threads 1.77 vs 1.20 s, 2 threads 4.17 vs 2.84 s;
+  SRR 4 threads 5.39 vs 4.27 s), on rows whose CPU check was well below the
+  others'. Queries were measured once each and the CPU check's reference was
+  taken at idle clock (values 1.2–2.7× "of start"); both are fixed (queries
+  are now the median of REPS runs, the reference is taken after 0.3 s of
+  spinning, every row reports its CPU check, and the summary marks rows
+  measured on a slowed CPU with †). The scaling rows above need a rerun
+  before conclusions are drawn from their differences.
+* What already holds: pre-sized, kache-hash's concurrent table inserts
+  1.6–1.9× faster than its own growing single-threaded table and faster than
+  unihash's concurrent table at one thread (chr21 10.5 vs 5.9 M/s); unihash
+  gains less from pre-sizing (it re-places index entries, not k-mers, when
+  it grows). The sharded `HashSet` scales worst (3.1–3.3× at 8 threads).
+* Queries, consistent across data sets and thread counts: random-order
+  positives `KmerTable` 0.95–1.4× kache-hash on chr21 and SRR (2× on
+  E. coli), random negatives `KmerTable` 1.3–2.4× kache-hash, streaming
+  `KmerTable` 1.9–2.9× kache-hash and `ConcurrentKmerTable` 1.0–1.8× (rows
+  marked as disturbed above left out); `HashSet` is
+  fastest for independent lookups and slowest for streaming.
+* Build note: g++ 13 warns `-Winvalid-memory-model` inside kache-hash's
+  `RW_Lock` (`atomic_flag::test(memory_order_acq_rel)`); GCC substitutes
+  seq_cst, so behaviour is unaffected. The warning is now silenced, with a
+  comment in `tools/kache_compare.sh`.
+
+## kache-hash and HashSet comparison, single-threaded and concurrent (2026-10-30, sandbox, 2 cores)
+
+`tools/kache_compare.sh` now also runs a thread-scaling comparison (see the
+README, "kache-hash comparison"). Sandbox run to validate the tooling
+(`REPS=1`, 1–2 threads; the laptop run will replace these numbers). Every
+structure held the same distinct k-mers and every kache-hash answer equalled
+unihash's. Three injected faults were caught: a wrong expected hit count, a
+dropped work item, and kache-hash built without `-fno-strict-aliasing`.
+
+chr21 (34.6 M distinct k-mers), insertion in M k-mers/s:
+
+| threads | unihash | kache-hash | HashSet<u64> |
+|---|---|---|---|
+| 1, single-threaded structure (grows) | 7.60 | 6.17 | 7.70 |
+| 1, concurrent structure (pre-sized) | 7.82 | 9.74 | 10.71 |
+| 2, concurrent structure (pre-sized) | 15.95 | 16.95 | 18.07 |
+
+Memory (B/k-mer): unihash 1.93 (`KmerTable`), 2.45 (concurrent table), 1.87
+(after `into_table`); kache-hash 23.50 (both versions); HashSet 17.44.
+Queries with 2 threads (M/s, positive / random / streaming): `KmerTable` 4.30 /
+6.15 / 68.5, `ConcurrentKmerTable` 3.26 / 4.90 / 48.6, kache-hash 3.05 / 3.80 /
+27.1, HashSet 15.1 / 24.0 / 16.1.
+
+* Pre-sizing helps the hash tables much more than unihash: one-thread
+  insertion +58 % for kache-hash, +39 % for HashSet, +3 % for unihash.
+  When unihash's single-threaded table grows, it re-places index entries
+  (about one per 8 k-mers) and never re-inserts k-mers; a hash table
+  re-inserts every k-mer.
+* The sharded HashSet is a strong baseline for insertion: per-shard buffers
+  turn random inserts into short runs on one shard.
+
+## Laptop A/B of the optimization rounds (2026-10-30)
+
+`bash tools/scale.sh` with `CAPACITY=1 DELETE=0.25`, 1/2/4/8 threads, on the
+laptop (4 cores, 8 hardware threads); raw output in `bench/results/ab/`
+(`*_prev.txt`, `*_new.txt`). Every table in both runs equals the
+single-threaded one with an exact index. The machine ran at the same speed
+in both runs: `KmerTable` deletion and queries, which neither round changed,
+agree within ±3 %.
+
+The `prev` build is the commit before optimization round 1 (its concurrent
+table is 2.41 B/k-mer on chr21 and its `into_table` takes 1.7–2.1 s, both as
+before round 1). The `KmerTable` rows therefore show round 2 alone; the
+concurrent rows show rounds 1 and 2 together.
+
+| | chr21 prev → new | SRR5833294 (2 M reads) prev → new |
+|---|---|---|
+| `KmerTable` insertion | 7.39 → 7.03 s (−5 %) | 25.6 → 22.4 s (−12 %) |
+| `KmerTable` B/k-mer after `shrink_to_fit` | 2.020 → 1.927 | 3.056 → 2.506 |
+| `KmerTable` peak B/k-mer during insertion | 2.58 → 3.24 | 4.03 → 3.34 |
+| concurrent insertion, 1 / 8 threads | 7.42 / 1.58 → 5.65 / 1.20 s (−24 %) | 21.8 / 4.38 → 16.1 / 3.30 s (−25 %) |
+| concurrent table, B/k-mer | 2.41 → 2.45 | 3.23 → 2.80 |
+| `into_table`, after `into_table` | 1.8–2.1 s, 2.007 → 0.82–0.85 s, 1.866 | 5.4–7.2 s, 3.047 → 2.6–2.7 s, 2.428 |
+| concurrent deletion, 8 threads | 0.63 → 0.60 s | 1.20 → 1.18 s |
+| concurrent streaming queries, 1 / 8 threads (new) | 25.4 / 99.8 M/s (63 / 59 % of `KmerTable`) | 14.3 / 67.2 M/s (71 / 72 %) |
+
+* The concurrent writer gains the same 24–26 % at every thread count, so
+  the insertion shortcuts do not cost scaling (8-thread speed-up 4.70× and
+  4.87×, as before).
+* `KmerTable` gains less here than in the sandbox (chr21 −5 % vs −11 to
+  −22 %): on the laptop the one-thread concurrent writer is now 24 % (chr21)
+  and 40 % (SRR) faster than `KmerTable` with the same shortcuts. Not
+  explained yet; the two differ in index growth (`KmerTable` grows one flat
+  index from empty, the writer fills pre-sized shards).
+* Peak memory during `KmerTable` insertion follows the growth-step landing of
+  the 64 B blocks (see round 2): chr21 lands on the larger side (+25 % peak),
+  SRR on the smaller (−17 %). The size after `shrink_to_fit` is smaller on
+  both.
+
 ## Optimization round 2: insertion shortcuts, 64 B blocks, in-place defrag, concurrent streaming (2026-10-29, sandbox, 2 cores)
 
 Against the previous commit on the same machine; `unihash-bench` (one

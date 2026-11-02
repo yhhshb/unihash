@@ -1,0 +1,17 @@
+== kache-hash scaling (k = 31, l = 17), 8 cores ==
+input: 2000000 items, 91929178 k-mers, 80209364 distinct
+single-threaded kache-hash: 91929178 k-mers in 16.820 s, 5.47 M k-mers/s, 80209364 distinct k-mers, 20.289 B/k-mer (heap; capacity 134217728 keys, overflow 2571247)
+queries on the single-threaded table, shared read-only (M queries/s):
+threads | kache positive | random | streaming | CPU check
+      1 |           1.41 |   1.69 |     10.06 |      0.70
+      2 |           2.83 |   3.32 |     18.38 |      0.93
+      4 |           5.04 |   5.76 |     35.17 |      0.92
+      8 |           6.70 |   7.40 |     40.98 |      0.89
+concurrent kache-hash (Streaming_Kmer_Hash_Table<k, true>, one token per thread, created for 80209364 k-mers):
+threads | insert s | M k-mers/s | speed-up vs 1 thread | B/k-mer (heap) | CPU check
+      1 |   10.267 |       8.95 |                 1.00 |         20.289 |      1.00
+      2 |    5.496 |      16.73 |                 1.87 |         20.289 |      0.98
+      4 |    3.370 |      27.28 |                 3.05 |         20.289 |      1.00
+      8 |    2.939 |      31.28 |                 3.49 |         20.289 |      0.98
+
+check: all kache-hash sizes and answers equal unihash's

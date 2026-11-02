@@ -131,6 +131,30 @@ unihash oracle. kache-hash must be compiled with `-fno-strict-aliasing`: at `-O3
 without that flag, GCC miscompiles it and it finds about 1 % of the present k-mers.
 `bash tools/kache_compare.sh NAME ARGS…` runs a single comparison.
 
+The same script then compares **single-threaded and concurrent versions** of
+each structure on each data set (`SCALE=0` skips this part, `SINGLE=0` the
+single-threaded comparison; `THREADS`, `REPS`; `DATA=chr21,…` for a subset). `unihash-scale --hashset --dump
+DIR` measures unihash and std `HashSet<u64>` and writes the work items and query
+workloads with their expected answers; `tools/kache/kache_scale.cpp` runs the
+same on kache-hash; `tools/kache/summarize_scale.py` prints the tables
+(`bench/results/kache/<data>_scale_summary.md`). For each thread count:
+
+* **Insertion**: `ConcurrentKmerTable`, concurrent kache-hash
+  (`Streaming_Kmer_Hash_Table<k, true>`, one token per thread) and a sharded
+  `HashSet<u64>` (1024 `Mutex<HashSet<u64>>`, each writer buffering 64 k-mers
+  per shard), all created for the distinct k-mer count and fed the same work
+  items handed out dynamically; and the single-threaded `KmerTable`,
+  kache-hash and `HashSet<u64>`, which grow from empty.
+* **Queries** (positive, uniform random, streaming): the single-threaded
+  tables shared read-only (none takes a lock), and `ConcurrentKmerTable` with
+  its shard read locks.
+* **Checks**: every structure holds the same distinct k-mers; kache-hash's hit
+  counts equal unihash's for every workload and thread count, or the script
+  stops.
+* **Noise**: builds and query runs are the median of `REPS`; every row
+  reports a one-thread CPU check, and the summary marks (†) rows measured
+  while the CPU ran more than 15 % below the run's median.
+
 The bench tool reads FASTA/FASTQ, optionally gzipped, and reports:
 
 * **Insertion** throughput, and the **table's memory on its own**, measured before
@@ -471,7 +495,8 @@ tests/m15_concurrent_stream.rs  ConcurrentStreamingQuery: equal to contains, cha
                           between and during pushes, writing callbacks
 tools/              ci.sh, fetch_data.sh, bench_real.sh, kache_compare.sh, churn_real.sh,
                     eager_compare.sh, scale.sh
-tools/kache/        kache_bench.cpp (kache-hash driver), summarize.py
+tools/kache/        kache_bench.cpp, kache_scale.cpp (kache-hash drivers: single-threaded,
+                    thread scaling), summarize.py, summarize_scale.py
 ```
 
 ## Design notes

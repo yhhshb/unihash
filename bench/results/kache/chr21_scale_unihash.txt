@@ -1,0 +1,46 @@
+== unihash-scale ==
+config: Config { k: 31, l: 17, bucket_bits: 10, max_piece_len: 4096, scan: TieOffsets, l2: 0, hot_threshold: 64, spill_dir: None, run_indexing: Eager }, shards 1024, cores 8
+CPU check 0.98× of start
+input: 714 items, 46731373 bases (loaded in 0.3 s)
+single-threaded KmerTable: 40087089 k-mers in 7.015 s, 5.71 M k-mers/s, 34625350 distinct k-mers, 1.927 B/k-mer (peak 3.235)
+queries: 10021773 positive, 10000000 random, streaming over 179 items (11725574 k-mers)
+
+-- baseline: std HashSet<u64> (default hasher) --
+single-threaded HashSet<u64>: 40087089 k-mers in 7.213 s, 5.56 M k-mers/s, 34625350 distinct k-mers, 17.443 B/k-mer (peak 26.165)
+queries on the single-threaded set, shared read-only (M queries/s):
+threads | HashSet positive | random | streaming | CPU check
+      1 |             6.95 |  12.46 |      7.96 |      0.59
+      2 |            14.03 |  25.41 |     13.10 |      0.56
+      4 |            25.92 |  48.26 |     27.59 |      0.48
+      8 |            25.14 |  51.22 |     29.88 |      0.98
+sharded HashSet<u64>: 1024 shards of Mutex<HashSet<u64>>, 64 k-mers buffered per shard and writer, each pre-sized for 35504 k-mers
+threads | insert s | M k-mers/s | speed-up vs 1 thread | B/k-mer (heap) | peak B/k-mer | CPU check
+      1 |    5.837 |       6.87 |                 1.00 |         17.445 |       17.461 |      0.98
+      2 |    3.163 |      12.67 |                 1.85 |         17.445 |       17.477 |      0.98
+      4 |    1.894 |      21.17 |                 3.08 |         17.445 |       17.509 |      0.98
+      8 |    1.768 |      22.68 |                 3.30 |         17.445 |       17.572 |      0.98
+workloads written to target/kache-dump/chr21_scale
+
+-- thread scaling: insertion (ConcurrentKmerTable, with_capacity(34625350): 8192 shards) --
+threads | insert s | M k-mers/s | speed-up vs 1 thread | vs KmerTable | efficiency | B/k-mer (heap) | peak B/k-mer | into_table s | B/k-mer after | chunk splits
+      1 |    5.506 |       7.28 |                 1.00 |         1.27 |       100 % |          2.450 |        2.451 |        0.883 |         1.866 | 520
+  4727622 lock acquisitions, 0 contended (0.000 %, 0 slept), 0.000 s waiting; 4389 shard growths, 0.056 s; promotions 0.274 s (thread-seconds); writer context switches 0 voluntary (slept), 231 involuntary (preempted); 409 minor page faults; CPU busy 100 % of 1 thread(s); CPU check 0.98× of start
+  check 1 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      2 |    2.911 |      13.77 |                 1.89 |         2.41 |        95 % |          2.450 |        2.451 |        0.894 |         1.867 | 533
+  4724627 lock acquisitions, 739 contended (0.016 %, 152 slept), 0.009 s waiting; 4349 shard growths, 0.066 s; promotions 0.311 s (thread-seconds); writer context switches 129 voluntary (slept), 160 involuntary (preempted); 430 minor page faults; CPU busy 99 % of 2 thread(s); CPU check 0.94× of start
+  check 2 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      4 |    1.714 |      23.38 |                 3.21 |         4.09 |        80 % |          2.450 |        2.451 |        0.870 |         1.866 | 519
+  4724564 lock acquisitions, 1960 contended (0.041 %, 351 slept), 0.025 s waiting; 4380 shard growths, 0.060 s; promotions 0.330 s (thread-seconds); writer context switches 303 voluntary (slept), 44 involuntary (preempted); 714 minor page faults; CPU busy 97 % of 4 thread(s); CPU check 0.98× of start
+  check 4 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+      8 |    1.373 |      29.20 |                 4.01 |         5.11 |        50 % |          2.451 |        2.452 |        0.882 |         1.867 | 527
+  4729801 lock acquisitions, 6681 contended (0.141 %, 409 slept), 0.195 s waiting; 4382 shard growths, 0.070 s; promotions 0.473 s (thread-seconds); writer context switches 417 voluntary (slept), 784 involuntary (preempted); 387 minor page faults; CPU busy 93 % of 8 thread(s); CPU check 0.98× of start
+  check 8 threads: 34625350 stored k-mers vs 34625350 single-threaded, 0 missing, index exact → OK
+
+-- thread scaling: queries (M queries/s; KmerTable is lock-free, ConcurrentKmerTable takes shard read locks) --
+threads | KmerTable positive | random | streaming | Concurrent positive | random | streaming | CPU check
+      1 |               1.81 |   3.14 |     37.11 |                1.41 |   2.95 |     25.81 |      0.97
+      2 |               3.86 |   6.44 |     62.06 |                2.22 |   5.68 |     35.98 |      0.81
+      4 |               6.92 |  11.49 |     87.30 |                5.58 |  11.50 |     71.74 |      0.90
+      8 |               8.56 |  12.98 |    114.03 |                7.05 |  13.08 |     76.74 |      0.55
+
+check: all multi-threaded tables equal the single-threaded one

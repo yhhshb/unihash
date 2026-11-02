@@ -58,6 +58,17 @@ cargo run --quiet --release --bin unihash-scale -- \
     --query-kmers 200000 --neg 200000 --sizes 0.5,1 --delete-frac 0.25 \
     | grep -E "check"
 
+step "HashSet baselines and workload dump for the kache-hash comparison (smoke run)"
+dump=$(mktemp -d)
+cargo run --quiet --release --bin unihash-scale -- \
+    --synthetic 200000 --threads 1,2 --capacity --hashset --dump "$dump" \
+    --query-kmers 100000 --neg 100000 \
+    | grep -E "HashSet<u64>:|workloads written"
+for f in manifest.tsv items.txt stream.txt pos.u64 neg.u64; do
+    [[ -s "$dump/$f" ]] || { echo "missing $f in the dump" >&2; exit 1; }
+done
+rm -rf "$dump"
+
 if [[ "${MIRI:-0}" == "1" ]]; then
     step "Miri (nightly) — unit + small tests"
     cargo +nightly miri test --lib --test m1_codec --test m3_store_index --test m7_hardening

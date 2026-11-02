@@ -2,40 +2,40 @@
 
 -- insertion --
 records 2000000, k-mers 91929178, distinct 80209364
-kache      16.057 s  5.73 M/s
+kache      16.504 s  5.57 M/s
 
 -- memory --
 kache heap (glibc)           1627412896 B  20.290 B/k-mer  (capacity 134217728 keys, overflow 2571247)
-RSS: before table 3.4 MiB, after table 1580.4 MiB (+1577.0 MiB), peak 2349.6 MiB
+RSS: before table 3.4 MiB, after table 1580.4 MiB (+1577.0 MiB), peak 2349.7 MiB
 
 -- queries: inserted input (positives) --
 workload: 22981157 k-mers, expected hits 22981157
-kmers-in-order                9.017 s     2.55 M/s   hits 22981157
-kmers-random-order           15.968 s     1.44 M/s   hits 22981157
-seq-streaming                 2.241 s    10.26 M/s   hits 22981157
+kmers-in-order                9.049 s     2.54 M/s   hits 22981157
+kmers-random-order           16.061 s     1.43 M/s   hits 22981157
+seq-streaming                 2.234 s    10.29 M/s   hits 22981157
   MISMATCHES vs unihash oracle 0
 
 -- queries: held-out records 2000001..4000000 of each input file --
 workload: 22980061 k-mers, expected hits 4613802
-kmers-in-order                8.710 s     2.64 M/s   hits 4613802
-kmers-random-order           13.475 s     1.71 M/s   hits 4613802
-seq-streaming                 1.969 s    11.67 M/s   hits 4613802
+kmers-in-order                8.693 s     2.64 M/s   hits 4613802
+kmers-random-order           13.421 s     1.71 M/s   hits 4613802
+seq-streaming                 1.975 s    11.64 M/s   hits 4613802
   MISMATCHES vs unihash oracle 0
 
 -- queries: query set data/SRR5901135_1.fastq.gz --
 workload: 20045807 k-mers, expected hits 468
-kmers-in-order                7.050 s     2.84 M/s   hits 468
-kmers-random-order           10.739 s     1.87 M/s   hits 468
-seq-streaming                 1.159 s    17.30 M/s   hits 468
+kmers-in-order                7.059 s     2.84 M/s   hits 468
+kmers-random-order           10.717 s     1.87 M/s   hits 468
+seq-streaming                 1.165 s    17.21 M/s   hits 468
   MISMATCHES vs unihash oracle 0
 
 -- queries: query set data/SRR5901135_2.fastq.gz --
 workload: 20151735 k-mers, expected hits 362
-kmers-in-order                7.128 s     2.83 M/s   hits 362
-kmers-random-order           10.832 s     1.86 M/s   hits 362
-seq-streaming                 1.173 s    17.18 M/s   hits 362
+kmers-in-order                7.108 s     2.84 M/s   hits 362
+kmers-random-order           10.840 s     1.86 M/s   hits 362
+seq-streaming                 1.180 s    17.08 M/s   hits 362
   MISMATCHES vs unihash oracle 0
 
 -- negative queries --
-kache       0.556 s  1.80 M/s
+kache       0.560 s  1.79 M/s
   FALSE POSITIVES              0

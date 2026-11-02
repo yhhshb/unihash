@@ -10,9 +10,18 @@
 //! as many threads. The single-threaded `KmerTable` build is the reference
 //! for speed-ups and, with `--check`, for exact set equality. With
 //! `--sizes`, the same measures are taken on growing prefixes of the input.
+//!
+//! With `--hashset`, std `HashSet<u64>` baselines are measured on the same
+//! work items: one set built on one thread (queried lock-free from every
+//! thread count), and a set sharded over `Mutex<HashSet<u64>>` built with
+//! each thread count. `--dump DIR` writes the work items and query
+//! workloads, with their expected answers, for `tools/kache/kache_scale`.
 
+use std::collections::HashSet;
+use std::io::Write;
 use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use unihash::codec::{canonical_kmers, kmer_mask};
 use unihash::rng::{repeat_rich_genome, sample_reads, Rng};
@@ -45,7 +54,8 @@ SCALING:
     --sizes LIST          also measure growing prefixes of the input, as
                           fractions, e.g. 0.125,0.25,0.5,1
     --size-threads N      threads used for --sizes (default: largest --threads)
-    --reps N              repetitions of each build; the median time is shown (default 1)
+    --reps N              repetitions of each build and of each query run; the
+                          median time is shown (default 1)
     --check               check each multi-threaded table against the
                           single-threaded one (same k-mers, none stored twice)
 
@@ -60,6 +70,15 @@ INPUT:
 
 QUERIES:
     --query-kmers N       positive k-mers sampled from the input (default 10000000)
+
+BASELINES:
+    --hashset             also measure std HashSet<u64>: built on one thread and
+                          queried lock-free with each thread count, and sharded
+                          (Mutex<HashSet<u64>> per shard, per-thread buffers)
+                          built with each thread count; pre-sized with
+                          --capacity like the concurrent table
+    --dump DIR            write the work items, query workloads and expected
+                          answers for tools/kache/kache_scale
 
 DELETION:
     --delete-frac F       also time concurrent deletion: build the table, then
@@ -91,6 +110,8 @@ struct Args {
     query_kmers: usize,
     neg: usize,
     delete_frac: f64,
+    hashset: bool,
+    dump: Option<std::path::PathBuf>,
 }
 
 fn die(msg: impl std::fmt::Display) -> ! {
@@ -123,6 +144,8 @@ fn parse_args() -> Args {
         query_kmers: 10_000_000,
         neg: 10_000_000,
         delete_frac: 0.0,
+        hashset: false,
+        dump: None,
     };
     let mut it = std::env::args().skip(1);
     fn val(it: &mut impl Iterator<Item = String>, f: &str) -> String {
@@ -173,6 +196,8 @@ fn parse_args() -> Args {
             "--query-kmers" => a.query_kmers = num(&mut it, "--query-kmers"),
             "--neg" => a.neg = num(&mut it, "--neg"),
             "--delete-frac" => a.delete_frac = num(&mut it, "--delete-frac"),
+            "--hashset" => a.hashset = true,
+            "--dump" => a.dump = Some(val(&mut it, "--dump").into()),
             _ if x.starts_with('-') => die(format!("unknown option {x}")),
             _ => a.inputs.push(x),
         }
@@ -377,11 +402,30 @@ fn concurrent_build(
     }
 }
 
-/// Run `f` over `n` parts in `threads` threads; returns (hits, time).
+/// Run `f` over `n` parts in `threads` threads, `reps` times; returns (hits,
+/// median time). Every repetition must give the same hits.
 fn parallel_count<F: Fn(usize, usize) -> u64 + Sync>(
+    reps: usize,
     n: usize,
     threads: usize,
     f: F,
+) -> (u64, Duration) {
+    let runs: Vec<(u64, Duration)> = (0..reps.max(1))
+        .map(|_| parallel_count_once(n, threads, &f))
+        .collect();
+    assert!(
+        runs.iter().all(|r| r.0 == runs[0].0),
+        "query answers differ between repetitions"
+    );
+    let mut times: Vec<Duration> = runs.iter().map(|r| r.1).collect();
+    times.sort();
+    (runs[0].0, times[times.len() / 2])
+}
+
+fn parallel_count_once<F: Fn(usize, usize) -> u64 + Sync>(
+    n: usize,
+    threads: usize,
+    f: &F,
 ) -> (u64, Duration) {
     let t0 = Instant::now();
     let hits = std::thread::scope(|s| {
@@ -518,6 +562,14 @@ fn main() {
         q.seq_kmers
     );
 
+    if a.hashset {
+        hashset_baselines(&a, &items, &q, kmers, distinct as usize);
+    }
+    if let Some(dir) = &a.dump {
+        dump_workloads(dir, &a, &items, &q, &st, kmers, distinct as usize);
+        println!("workloads written to {}", dir.display());
+    }
+
     let sizing = if a.capacity {
         format!(
             "with_capacity({distinct}): {} shards",
@@ -554,14 +606,14 @@ fn main() {
         let r1 = *base_rate.get_or_insert(r);
         let cs = b.table.stats();
         // Locked queries on the concurrent table.
-        let (hp, dp) = parallel_count(q.pos.len(), th, |s, e| {
+        let (hp, dp) = parallel_count(a.reps, q.pos.len(), th, |s, e| {
             q.pos[s..e].iter().filter(|&&x| b.table.contains(x)).count() as u64
         });
-        let (_, dn) = parallel_count(q.neg.len(), th, |s, e| {
+        let (_, dn) = parallel_count(a.reps, q.neg.len(), th, |s, e| {
             q.neg[s..e].iter().filter(|&&x| b.table.contains(x)).count() as u64
         });
         assert_eq!(hp as usize, q.pos.len(), "positive query missed");
-        let (hs, ds) = parallel_count(q.seqs.len(), th, |s, e| {
+        let (hs, ds) = parallel_count(a.reps, q.seqs.len(), th, |s, e| {
             let mut sq = b.table.query_stream();
             let mut h = 0u64;
             for r in &q.seqs[s..e] {
@@ -616,16 +668,16 @@ fn main() {
     }
 
     println!("\n-- thread scaling: queries (M queries/s; KmerTable is lock-free, ConcurrentKmerTable takes shard read locks) --");
-    println!("threads | KmerTable positive | random | streaming | Concurrent positive | random | streaming");
+    println!("threads | KmerTable positive | random | streaming | Concurrent positive | random | streaming | CPU check");
     let mut sq_hits = 0;
     for (i, &th) in a.threads.iter().enumerate() {
-        let (hp, dp) = parallel_count(q.pos.len(), th, |s, e| {
+        let (hp, dp) = parallel_count(a.reps, q.pos.len(), th, |s, e| {
             q.pos[s..e].iter().filter(|&&x| st.contains(x)).count() as u64
         });
-        let (_, dn) = parallel_count(q.neg.len(), th, |s, e| {
+        let (_, dn) = parallel_count(a.reps, q.neg.len(), th, |s, e| {
             q.neg[s..e].iter().filter(|&&x| st.contains(x)).count() as u64
         });
-        let (hs, ds) = parallel_count(q.seqs.len(), th, |s, e| {
+        let (hs, ds) = parallel_count(a.reps, q.seqs.len(), th, |s, e| {
             let mut sq = st.query_stream();
             let mut h = 0u64;
             for r in &q.seqs[s..e] {
@@ -638,13 +690,14 @@ fn main() {
         sq_hits = hs;
         let (_, lp, ln, ls) = locked[i];
         println!(
-            "{th:7} | {:18.2} | {:6.2} | {:9.2} | {:19.2} | {:6.2} | {:9.2}",
+            "{th:7} | {:18.2} | {:6.2} | {:9.2} | {:19.2} | {:6.2} | {:9.2} | {:9.2}",
             rate(q.pos.len(), dp),
             rate(q.neg.len(), dn),
             rate(q.seq_kmers, ds),
             lp,
             ln,
-            ls
+            ls,
+            cpu_ratio()
         );
     }
     assert_eq!(
@@ -815,13 +868,23 @@ fn cpu_speed() -> f64 {
 
 static CPU_BASE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
 
-/// One-thread CPU speed now, relative to the start of the run: a value well
-/// below 1 means the machine was throttled or busy when the row above was
-/// measured.
+/// One-thread CPU speed now (best of three short runs), relative to the
+/// start of the run, where it is taken after 0.3 s of spinning so that the
+/// core has left its idle clock: a value well below 1 means the machine was
+/// throttled or busy when the row was measured.
+fn cpu_ratio() -> f64 {
+    let base = *CPU_BASE.get_or_init(|| {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(300) {
+            cpu_speed();
+        }
+        (0..5).map(|_| cpu_speed()).fold(0.0, f64::max)
+    });
+    (0..3).map(|_| cpu_speed()).fold(0.0, f64::max) / base
+}
+
 fn cpu_note() -> String {
-    let now = cpu_speed();
-    let base = *CPU_BASE.get_or_init(|| now);
-    format!("CPU check {:.2}× of start", now / base)
+    format!("CPU check {:.2}× of start", cpu_ratio())
 }
 
 /// k-mers of `seqs` that contain a non-ACGT character (not answered).
@@ -829,4 +892,227 @@ fn count_invalid(seqs: &[Vec<u8>], k: usize) -> usize {
     let all: usize = seqs.iter().map(|r| r.len().saturating_sub(k - 1)).sum();
     let valid: usize = seqs.iter().map(|r| canonical_kmers(r, k).count()).sum();
     all - valid
+}
+
+/// Shards of the sharded `HashSet<u64>` baseline.
+const SET_SHARDS: usize = 1024;
+/// k-mers a writer buffers per shard before taking the shard's lock.
+const SET_BUFFER: usize = 64;
+
+#[inline]
+fn set_shard(x: u64) -> usize {
+    (x.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - SET_SHARDS.trailing_zeros())) as usize
+}
+
+/// std `HashSet<u64>` baselines on the same work items and queries: one set
+/// built on one thread, queried lock-free with each thread count; and a set
+/// sharded over `Mutex<HashSet<u64>>` built with each thread count.
+fn hashset_baselines(a: &Args, items: &[Vec<u8>], q: &Queries, kmers: usize, distinct: usize) {
+    let k = a.cfg.k;
+    let valid_seq = q.seq_kmers - count_invalid(&q.seqs, k);
+    println!("\n-- baseline: std HashSet<u64> (default hasher) --");
+    let mut times = Vec::new();
+    let mut built = None;
+    for _ in 0..a.reps {
+        drop(built.take());
+        let base = counting::current();
+        counting::reset_peak();
+        let t0 = Instant::now();
+        let mut set: HashSet<u64> = HashSet::new();
+        for r in items {
+            for x in canonical_kmers(r, k) {
+                set.insert(x);
+            }
+        }
+        let d = t0.elapsed();
+        times.push(secs(d));
+        built = Some((set, counting::current() - base, counting::peak() - base));
+    }
+    let (set, heap, peak) = built.unwrap();
+    assert_eq!(set.len(), distinct, "HashSet: wrong number of k-mers");
+    let time = median(times);
+    println!(
+        "single-threaded HashSet<u64>: {kmers} k-mers in {time:.3} s, {:.2} M k-mers/s, {} distinct k-mers, {:.3} B/k-mer (peak {:.3})",
+        kmers as f64 / time / 1e6,
+        set.len(),
+        heap as f64 / distinct as f64,
+        peak as f64 / distinct as f64
+    );
+    println!("queries on the single-threaded set, shared read-only (M queries/s):");
+    println!("threads | HashSet positive | random | streaming | CPU check");
+    for &th in &a.threads {
+        let (hp, dp) = parallel_count(a.reps, q.pos.len(), th, |s, e| {
+            q.pos[s..e].iter().filter(|&&x| set.contains(&x)).count() as u64
+        });
+        let (_, dn) = parallel_count(a.reps, q.neg.len(), th, |s, e| {
+            q.neg[s..e].iter().filter(|&&x| set.contains(&x)).count() as u64
+        });
+        let (hs, ds) = parallel_count(a.reps, q.seqs.len(), th, |s, e| {
+            q.seqs[s..e]
+                .iter()
+                .map(|r| canonical_kmers(r, k).filter(|x| set.contains(x)).count() as u64)
+                .sum()
+        });
+        assert_eq!(hp as usize, q.pos.len(), "HashSet: positive query missed");
+        assert_eq!(hs as usize, valid_seq, "HashSet: streaming missed");
+        println!(
+            "{th:7} | {:16.2} | {:6.2} | {:9.2} | {:9.2}",
+            rate(q.pos.len(), dp),
+            rate(q.neg.len(), dn),
+            rate(q.seq_kmers, ds),
+            cpu_ratio()
+        );
+    }
+    drop(set);
+
+    let per_shard = a.capacity.then(|| distinct.div_ceil(SET_SHARDS) * 21 / 20);
+    println!(
+        "sharded HashSet<u64>: {SET_SHARDS} shards of Mutex<HashSet<u64>>, {SET_BUFFER} k-mers buffered per shard and writer{}",
+        match per_shard {
+            Some(n) => format!(", each pre-sized for {n} k-mers"),
+            None => String::new(),
+        }
+    );
+    println!(
+        "threads | insert s | M k-mers/s | speed-up vs 1 thread | B/k-mer (heap) | peak B/k-mer | CPU check"
+    );
+    let mut r1 = None;
+    for &th in &a.threads {
+        let mut times = Vec::new();
+        let mut last = (0, 0);
+        for _ in 0..a.reps {
+            let base = counting::current();
+            counting::reset_peak();
+            let t0 = Instant::now();
+            let shards: Vec<Mutex<HashSet<u64>>> = (0..SET_SHARDS)
+                .map(|_| Mutex::new(HashSet::with_capacity(per_shard.unwrap_or(0))))
+                .collect();
+            let next = AtomicUsize::new(0);
+            let batch = (items.len() / (th * 16)).clamp(1, BATCH);
+            std::thread::scope(|s| {
+                for _ in 0..th {
+                    let (shards, next) = (&shards, &next);
+                    s.spawn(move || {
+                        let mut buf: Vec<Vec<u64>> = (0..SET_SHARDS)
+                            .map(|_| Vec::with_capacity(SET_BUFFER))
+                            .collect();
+                        let flush = |i: usize, b: &mut Vec<u64>| {
+                            let mut set = shards[i].lock().unwrap();
+                            set.extend(b.drain(..));
+                        };
+                        loop {
+                            let i = next.fetch_add(batch, Ordering::Relaxed);
+                            if i >= items.len() {
+                                break;
+                            }
+                            for r in &items[i..(i + batch).min(items.len())] {
+                                for x in canonical_kmers(r, k) {
+                                    let h = set_shard(x);
+                                    buf[h].push(x);
+                                    if buf[h].len() == SET_BUFFER {
+                                        flush(h, &mut buf[h]);
+                                    }
+                                }
+                            }
+                        }
+                        for (h, b) in buf.iter_mut().enumerate() {
+                            if !b.is_empty() {
+                                flush(h, b);
+                            }
+                        }
+                    });
+                }
+            });
+            times.push(secs(t0.elapsed()));
+            let n: usize = shards.iter().map(|m| m.lock().unwrap().len()).sum();
+            assert_eq!(n, distinct, "sharded HashSet: wrong number of k-mers");
+            last = (counting::current() - base, counting::peak() - base);
+        }
+        let time = median(times);
+        let r = kmers as f64 / time / 1e6;
+        let base = *r1.get_or_insert(r);
+        println!(
+            "{th:7} | {time:8.3} | {r:10.2} | {:20.2} | {:14.3} | {:12.3} | {:9.2}",
+            r / base,
+            last.0 as f64 / distinct as f64,
+            last.1 as f64 / distinct as f64,
+            cpu_ratio()
+        );
+    }
+}
+
+/// Write the work items, query workloads and expected answers for the
+/// kache-hash driver (`tools/kache/kache_scale.cpp`):
+///
+/// * `manifest.tsv`: `k`, `l`, `kmers` (k-mers looked up during insertion),
+///   `distinct`, `capacity` (0/1), `reps`, `threads` (comma-separated),
+///   `items N`, `pos N HITS`, `neg N HITS`, `stream SEQS WINDOWS VALID HITS`
+///   (windows: k-long windows, the denominator of the streaming rates;
+///   valid: those without a non-ACGT base, the k-mers looked up)
+/// * `items.txt`, `stream.txt`: one sequence per line
+/// * `pos.u64`, `neg.u64`: k-mers, 2-bit (A=0 … T=3, first base in the
+///   high bits), little-endian `u64`
+fn dump_workloads(
+    dir: &std::path::Path,
+    a: &Args,
+    items: &[Vec<u8>],
+    q: &Queries,
+    st: &KmerTable,
+    kmers: usize,
+    distinct: usize,
+) {
+    let k = a.cfg.k;
+    let fail = |e: std::io::Error| -> ! { die(format!("--dump {}: {e}", dir.display())) };
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| fail(e));
+    let file = |name: &str| {
+        std::io::BufWriter::new(std::fs::File::create(dir.join(name)).unwrap_or_else(|e| fail(e)))
+    };
+    let lines = |name: &str, seqs: &[Vec<u8>]| {
+        let mut w = file(name);
+        for r in seqs {
+            if r.contains(&b'\n') {
+                die("--dump: a sequence contains a newline");
+            }
+            w.write_all(r)
+                .and_then(|_| w.write_all(b"\n"))
+                .unwrap_or_else(|e| fail(e));
+        }
+        w.flush().unwrap_or_else(|e| fail(e));
+    };
+    let words = |name: &str, xs: &[u64]| {
+        let mut w = file(name);
+        for x in xs {
+            w.write_all(&x.to_le_bytes()).unwrap_or_else(|e| fail(e));
+        }
+        w.flush().unwrap_or_else(|e| fail(e));
+    };
+    lines("items.txt", items);
+    lines("stream.txt", &q.seqs);
+    words("pos.u64", &q.pos);
+    words("neg.u64", &q.neg);
+    let pos_hits = q.pos.iter().filter(|&&x| st.contains(x)).count();
+    let neg_hits = q.neg.iter().filter(|&&x| st.contains(x)).count();
+    let seq_hits: usize = q
+        .seqs
+        .iter()
+        .map(|r| canonical_kmers(r, k).filter(|&x| st.contains(x)).count())
+        .sum();
+    let threads: Vec<String> = a.threads.iter().map(|t| t.to_string()).collect();
+    let mut m = file("manifest.tsv");
+    writeln!(
+        m,
+        "k\t{k}\nl\t{}\nkmers\t{kmers}\ndistinct\t{distinct}\ncapacity\t{}\nreps\t{}\nthreads\t{}\nitems\t{}\npos\t{}\t{pos_hits}\nneg\t{}\t{neg_hits}\nstream\t{}\t{}\t{}\t{seq_hits}",
+        a.cfg.l,
+        a.capacity as u8,
+        a.reps,
+        threads.join(","),
+        items.len(),
+        q.pos.len(),
+        q.neg.len(),
+        q.seqs.len(),
+        q.seq_kmers,
+        q.seq_kmers - count_invalid(&q.seqs, k),
+    )
+    .and_then(|_| m.flush())
+    .unwrap_or_else(|e| fail(e));
 }
