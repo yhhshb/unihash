@@ -9,7 +9,8 @@
 #      python3); if cargo is missing, it installs a private Rust toolchain
 #      into external/rust (nothing outside the repository is touched);
 #   2. downloads the data sets into data/ with tools/fetch_data.sh --reads
-#      when any of them is missing;
+#      when any of them is missing (only the 2 x MAX_READS records of
+#      SRR5833294 that the runs use);
 #   3. clones kache-hash (pinned commit) into external/kache-hash and builds
 #      its drivers into external/bin (tools/kache_compare.sh --setup);
 #   4. records the machine (CPU, memory, OS, compilers, governor, commit);
@@ -44,6 +45,8 @@
 #   MAX_READS  records of SRR5833294 inserted (default 2000000, as in the paper)
 #   CXX        C++ compiler (default g++, needs C++20 and <atomic> wait/notify)
 #   NO_FETCH=1 fail instead of downloading missing data
+#   READS_SOURCE  sra (default, NCBI SRA via the SRA Toolkit installed into
+#              external/sratoolkit) or ena; see tools/fetch_data.sh
 #
 # For stable numbers: plug in, close other programs, and set the
 # performance governor (sudo cpupower frequency-set -g performance). The
@@ -118,14 +121,23 @@ note "cargo: $(command -v cargo) ($(cargo -V))"
 
 # ---------------------------------------------------------------- 2. data
 say "checking data sets"
+# Only the records of SRR5833294 that the runs use are downloaded: the first
+# MAX_READS are inserted and the next MAX_READS queried as held-out reads.
+if [[ "$MAX_READS" == "0" ]]; then READS_RECORDS=0; else READS_RECORDS=$((2 * MAX_READS)); fi
+export READS_RECORDS
 have_data() {
     [[ -s data/ecoli_NC_000913.3.fa && -s data/chr21.fa.gz ]] || return 1
     compgen -G "data/SRR5833294*.fastq.gz" >/dev/null || return 1
     compgen -G "data/SRR5901135*.fastq.gz" >/dev/null || return 1
+    # A partial download made by fetch_data.sh must cover READS_RECORDS
+    # (no .records file: a whole run fetched otherwise).
+    local have
+    have=$(cat data/SRR5833294.fastq.gz.records 2>/dev/null || echo whole)
+    [[ "$have" == "whole" ]] || [[ "$READS_RECORDS" != "0" && "$have" -ge "$READS_RECORDS" ]]
 }
 if ! have_data; then
     [[ "${NO_FETCH:-0}" == "1" ]] && die "data sets missing in data/ and NO_FETCH=1"
-    note "data sets missing: running tools/fetch_data.sh --reads (several GB)"
+    note "data sets missing: running tools/fetch_data.sh --reads (READS_RECORDS=$READS_RECORDS, READS_SOURCE=${READS_SOURCE:-sra})"
     df -h . | tee -a "$LOG"
     bash tools/fetch_data.sh --reads 2>&1 | tee -a "$LOG"
     have_data || die "tools/fetch_data.sh finished but data sets are still missing"
@@ -167,7 +179,9 @@ say "recording the machine"
     cargo -V
     "$CXX_BIN" --version | head -1
     python3 --version
-    echo "kache-hash: $(git -C external/kache-hash rev-parse HEAD)"
+    echo "kache-hash: $(git -C external/kache-hash rev-parse HEAD)$( [[ "${KACHE_PATCH:-1}" == "1" ]] && echo " + tools/kache/kache-hash-lock.patch")"
+    [[ -x external/sratoolkit/bin/fastq-dump ]] && echo "SRA Toolkit: $(external/sratoolkit/bin/fastq-dump --version | grep -m1 .)"
+    echo "SRR5833294 records in data/: $(cat data/SRR5833294.fastq.gz.records 2>/dev/null || echo 'whole run')"
     echo
     echo "## unihash source"
     echo "commit: $(git rev-parse HEAD 2>/dev/null || echo 'not a git checkout')"

@@ -1,0 +1,54 @@
+Fix for the bucket lock of kache-hash's concurrent table (commit f7cfa5b),
+applied by tools/kache_compare.sh before building (KACHE_PATCH=0 builds the
+upstream code unchanged).
+
+The lock of bucket i is the top bit of M[i].min_coord[0]. place_at() stores
+the minimizer coordinate of slot j with a plain assignment, so placing a k-mer
+into slot 0 (the first k-mer of a bucket) clears the lock while the inserting
+thread still holds it. Another thread can then lock the bucket, and the first
+thread's unlock (a plain `&= ~lock_mask`) clears that thread's lock as well,
+so two threads can modify the same bucket: a k-mer can be stored twice (the
+table size is then too large) or a slot overwritten. unlock() also had no
+release ordering, so the compiler could move the slot writes after it.
+
+Fix: keep the lock bit when writing slot 0 in the concurrent table, and
+release the lock with a release store (a plain store on x86). The
+single-threaded table (mt_ = false) is unchanged. tools/kache/kache_lock_stress.cpp
+reproduces the bug (about 1 round in 2000 with 2 threads, 100 kbp) and shows
+the fix (0 of 12000 rounds).
+
+diff --git a/include/Streaming_Kmer_Hash_Table.hpp b/include/Streaming_Kmer_Hash_Table.hpp
+index a1d391e..160505b 100644
+--- a/include/Streaming_Kmer_Hash_Table.hpp
++++ b/include/Streaming_Kmer_Hash_Table.hpp
+@@ -184,13 +184,13 @@ private:
+     // Directly places the element `e` with checksum `c` and minimizer-
+     // coordinate `m` into the `i`'th bucket at index `j`.
+     void place_at(const flat_t& e, const uint8_t c, const uint8_t m, const std::size_t i, const std::size_t j)
+-    { T[i * B + j] = e, M[i].cs[j] = c, M[i].min_coord[j] = m; }
++    { T[i * B + j] = e, M[i].cs[j] = c, M[i].min_coord[j] = (mt_ && j == 0) ? uint8_t(m | Metadata::lock_mask) : m; }
+ 
+     // Directly places the element `e` with checksum `c` and minimizer-
+     // coordinate `m` into the `i`'th bucket at index `j` of the new resized
+     // table.
+     void place_at_resize(const flat_t& e, const uint8_t c, const uint8_t m, const std::size_t i, const std::size_t j)
+-    { T_new[i * B + j] = e, M_new[i].cs[j] = c, M_new[i].min_coord[j] = m; }
++    { T_new[i * B + j] = e, M_new[i].cs[j] = c, M_new[i].min_coord[j] = (mt_ && j == 0) ? uint8_t(m | Metadata::lock_mask) : m; }
+ 
+     // Tries to insert the element `e` with checksum `c` and minimizer-
+     // coordinate `m` into the `i`'th bucket. It succeeds iff the key was absent
+@@ -564,12 +564,12 @@ inline void Streaming_Kmer_Hash_Table<k, mt_, T_, l>::unlock(const std::size_t b
+         if constexpr(!resize_)
+         {
+             assert(M[b].min_coord[0] & Metadata::lock_mask);
+-            M[b].min_coord[0] &= ~Metadata::lock_mask;
++            __atomic_store_n(&M[b].min_coord[0], uint8_t(M[b].min_coord[0] & ~Metadata::lock_mask), __ATOMIC_RELEASE);
+         }
+         else
+         {
+             assert(M_new[b].min_coord[0] & Metadata::lock_mask);
+-            M_new[b].min_coord[0] &= ~Metadata::lock_mask;
++            __atomic_store_n(&M_new[b].min_coord[0], uint8_t(M_new[b].min_coord[0] & ~Metadata::lock_mask), __ATOMIC_RELEASE);
+         }
+     }
+ }

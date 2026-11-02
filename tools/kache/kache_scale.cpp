@@ -387,8 +387,10 @@ int main(int argc, char** argv) {
             heap = heap_bytes() - h0;
             size = t->size();
             delete t;
+            check(size == distinct, "concurrent kache-hash size, " + std::to_string(th) + " threads, repetition " +
+                                        std::to_string(r + 1) + ": " + std::to_string(size) + " k-mers, expected " +
+                                        std::to_string(distinct));
         }
-        check(size == distinct, "concurrent kache-hash size, " + std::to_string(th) + " threads");
         double time = median(ts);
         double r = kmers / time / 1e6;
         if (r1 == 0) r1 = r;

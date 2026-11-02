@@ -84,7 +84,7 @@ being UB. `k = 32` and `ℓ = 32` are tested explicitly.
 ```bash
 cargo run --release --bin unihash-bench -- --help
 cargo run --release --bin unihash-bench -- --synthetic-repeats 4600000
-bash tools/fetch_data.sh [--reads]  # E. coli, chr21 [+ SRR5833294, SRR5901135] into data/
+bash tools/fetch_data.sh [--reads]  # E. coli, chr21 [+ first 4 M reads of SRR5833294, SRR5901135] into data/
 bash tools/bench_real.sh            # benchmark matrix on real data → bench/results/
 bash tools/kache_compare.sh         # same workloads on kache-hash → bench/results/kache/
 bash tools/churn_real.sh            # deletion/re-insertion churn × defrag policies → bench/results/churn/
@@ -144,6 +144,12 @@ k = 31 and ℓ = 17, and its answers are checked against the hit counts from the
 unihash oracle. kache-hash must be compiled with `-fno-strict-aliasing`: at `-O3`
 without that flag, GCC miscompiles it and it finds about 1 % of the present k-mers.
 `bash tools/kache_compare.sh NAME ARGS…` runs a single comparison.
+Before building, `tools/kache/kache-hash-lock.patch` is applied to kache-hash: in its
+concurrent table, storing the first k-mer of a bucket cleared the bucket's lock bit
+while the lock was held, so two threads could modify one bucket and a k-mer could be
+stored twice (found by the size check of the scaling comparison at 4 threads on
+chr21; `tools/kache/kache_lock_stress.cpp` reproduces it). The fix does not touch the
+single-threaded table; `KACHE_PATCH=0` builds the upstream code.
 
 The same script then compares **single-threaded and concurrent versions** of
 each structure on each data set (`SCALE=0` skips this part, `SINGLE=0` the

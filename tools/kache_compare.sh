@@ -9,6 +9,9 @@
 #
 # kache-hash is cloned into external/kache-hash (pinned commit) and the drivers
 # are built into external/bin/; external/ is not part of the repository.
+# tools/kache/kache-hash-lock.patch is applied first: it fixes a race in the
+# bucket lock of kache-hash's concurrent table that can store a k-mer twice
+# (found by the size check below; KACHE_PATCH=0 builds the upstream code).
 #
 # Two comparisons per data set.
 #
@@ -56,6 +59,7 @@
 # order, so behaviour is unaffected. The warning is silenced for the build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT=$(pwd)
 
 KACHE_COMMIT=f7cfa5be4bcd28ffa061588c7c80445cbd5690d0
 KDIR=external/kache-hash
@@ -70,19 +74,28 @@ setup_kache() {
     fi
     if [[ "$(git -C "$KDIR" rev-parse HEAD)" != "$KACHE_COMMIT" ]]; then
         git -C "$KDIR" fetch --quiet origin || true
-        git -C "$KDIR" checkout --quiet "$KACHE_COMMIT"
+    fi
+    # Pinned commit, then the lock fix (see tools/kache/kache-hash-lock.patch).
+    git -C "$KDIR" checkout --quiet --force "$KACHE_COMMIT"
+    local patch=none
+    if [[ "${KACHE_PATCH:-1}" == "1" ]]; then
+        git -C "$KDIR" apply "$ROOT/tools/kache/kache-hash-lock.patch"
+        patch=$(cksum < tools/kache/kache-hash-lock.patch | cut -d' ' -f1)
+        echo "kache-hash $KACHE_COMMIT with tools/kache/kache-hash-lock.patch"
+    else
+        echo "kache-hash $KACHE_COMMIT unpatched (KACHE_PATCH=0)"
     fi
     mkdir -p "$BIN"
     local L1
     L1=$(getconf LEVEL1_DCACHE_LINESIZE 2>/dev/null || echo 64)
     [[ "$L1" =~ ^[0-9]+$ && "$L1" -gt 0 ]] || L1=64
-    # Rebuild when the driver or the pinned commit changed (-march=native:
-    # binaries copied from another machine are rebuilt too).
+    # Rebuild when the driver, the pinned commit or the patch changed
+    # (-march=native: binaries copied from another machine are rebuilt too).
     local stamp="$BIN/.kache-build"
     local want host
     host=$(uname -n)
-    want="$KACHE_COMMIT $CXX L1=$L1 $host"
-    for tool in kache_bench kache_scale; do
+    want="$KACHE_COMMIT patch=$patch $CXX L1=$L1 $host"
+    for tool in kache_bench kache_scale kache_lock_stress; do
         if [[ ! "$BIN/$tool" -nt tools/kache/$tool.cpp || "$(cat "$stamp" 2>/dev/null)" != "$want" ]]; then
             echo "building $BIN/$tool with $CXX"
             "$CXX" -std=c++20 -O3 -funroll-loops -march=native -fno-strict-aliasing -Wno-invalid-memory-model \
