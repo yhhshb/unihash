@@ -59,7 +59,8 @@ pub mod stream_query;
 pub mod table;
 
 pub use concurrent::{
-    ConcurrentKmerTable, ConcurrentStats, ConcurrentStreamingQuery, ContentionStats, Writer,
+    ConcurrentKmerTable, ConcurrentStats, ConcurrentStreamingQuery, ContentionStats, ReadSnapshot,
+    Writer,
 };
 pub use edit::{EditStats, Fragmentation};
 pub use oracle::Oracle;

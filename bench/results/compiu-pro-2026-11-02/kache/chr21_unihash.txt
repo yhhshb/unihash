@@ -4,8 +4,8 @@ input:  ["data/chr21.fa.gz"]
 
 -- insertion --
 records 1, bases 46709983, k-mers 40087089
-table       5.190 s  7.72 M/s
-oracle      4.648 s  8.63 M/s
+table       5.644 s  7.10 M/s
+oracle      5.101 s  7.86 M/s
 
 -- table stats --
 table (k=31, ℓ=17)
@@ -47,7 +47,7 @@ table heap, allocator            66722776 B   1.927 B/k-mer  (live after shrink_
 heap peak during insertion      118485436 B   3.422 B/k-mer  (index growth, Vec slack, I/O and insertion buffers; 80130056 B live before shrink)
 insertion buffers                    2080 B  (bounded by ~14 × max_piece_len, not by input length)
 index growth spill           37 rebuilds; 0 B via disk, 134433720 B via memory
-RSS: process before table 2.3 MiB, after table 113.2 MiB (+110.9 MiB), peak 191.0 MiB
+RSS: process before table 2.4 MiB, after table 113.2 MiB (+110.9 MiB), peak 191.1 MiB
 oracle HashSet<u64>, allocator  603979792 B  17.443 B/k-mer  (estimate from capacity 603979792 B)
 ideal u64 table @7/8 load       316574628 B   9.143 B/k-mer
 mean piece length            313.0 bases (index entries / piece 35.34)
@@ -55,11 +55,11 @@ mean piece length            313.0 bases (index entries / piece 35.34)
 -- queries: inserted input (positives) --
 workload: 17166787 k-mers from 20623 windows; windows of ≤1000 bases every 2265 bases over 46709983 bases (1 records); hit rate 1.0000
 pattern (same k-mers)        table                         oracle HashSet<u64>
-kmers-in-order                3.674 s     4.67 M/s         1.608 s    10.67 M/s
-kmers-random-order            7.004 s     2.45 M/s         1.679 s    10.22 M/s
-seq-parse-only                0.075 s   229.02 M/s      n/a
-seq-independent               3.729 s     4.60 M/s         2.940 s     5.84 M/s
-seq-streaming                 0.549 s    31.28 M/s      n/a
+kmers-in-order                3.821 s     4.49 M/s         1.754 s     9.79 M/s
+kmers-random-order            7.534 s     2.28 M/s         1.757 s     9.77 M/s
+seq-parse-only                0.075 s   227.71 M/s      n/a
+seq-independent               3.912 s     4.39 M/s         3.371 s     5.09 M/s
+seq-streaming                 0.590 s    29.10 M/s      n/a
 k-mers in order (pre-parsed):
   queries                      17166787
   hits                         17166787
@@ -88,8 +88,8 @@ streaming:
   MISMATCHES vs oracle       0 (in-order 0, random 0, seq 0, streaming 0)
 
 -- negative queries (uniform random k-mers absent from the set) --
-table       0.250 s  3.99 M/s
-oracle      0.055 s  18.07 M/s
+table       0.269 s  3.72 M/s
+oracle      0.061 s  16.32 M/s
   queries                      1000000
   hits                         0
   entries scanned / query      11.198  (max 103)
@@ -109,16 +109,16 @@ entries/minimizer   #minimizers
        16-31        2726
        32-63        1147
 hottest minimizers:
-  GAGATTTTATATGAAGA  63
-  CCATTCCACTCCACTCC  63
-  ATATATATATACACATA  63
+  GTTCACACATCACAAAC  63
+  CAGGTGCCCACCACCAC  63
   CACCTGCCTCGGCCTCC  63
-  ATTGCTTGAGCTCAGGA  63
-  CATTAGGACAGCTTTCA  63
+  CCTCAGCTTCCCAAGTA  63
+  CGAGGTCAGGAGATCGA  63
+  ATCTCAGCTACTCAGGA  63
+  ACTAATTTACACTCCCA  63
+  TCTCAAAAAAATAAAAA  63
   CCTCCTGGGCTCAAGCA  63
-  AACATGGCGAAACCCCA  63
-  CACTCCAGCCTGGATGA  63
-  AGTTCAAGACCAGCCTA  63
+  CCATTCCACTCCACTCC  63
 buckets: 772109 total (7 slots each), 62 empty, max chain occupancy 70, overflow blocks 49530, grew 18×
 
-peak RSS 1216.7 MiB (whole run, includes the oracle and query workloads)
+peak RSS 1216.9 MiB (whole run, includes the oracle and query workloads)

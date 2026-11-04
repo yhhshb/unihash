@@ -55,7 +55,7 @@ cargo run --quiet --release --bin unihash-churn -- \
 step "concurrent insertion smoke run (each thread count checked against the single-threaded table)"
 cargo run --quiet --release --bin unihash-scale -- \
     --synthetic-repeats 300000 --reads 20000 --threads 1,2,4,8 --shards 16 --check \
-    --query-kmers 200000 --neg 200000 --sizes 0.5,1 --delete-frac 0.25 \
+    --query-kmers 200000 --neg 200000 --sizes 0.5,1 --delete-frac 0.25 --defrag-compare \
     | grep -E "check"
 
 step "HashSet baselines and workload dump for the kache-hash comparison (smoke run)"

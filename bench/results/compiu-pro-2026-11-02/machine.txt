@@ -1,4 +1,4 @@
-# Machine record, 2026-11-02T17:29:29+01:00
+# Machine record, 2026-11-02T18:16:21+01:00
 host: compiu-pro
 kernel: Linux 6.8.0-147-generic x86_64 GNU/Linux
 os: "Ubuntu 24.04.5 LTS"
@@ -19,7 +19,7 @@ Thread(s) per core:                      2
 Core(s) per socket:                      6
 Socket(s):                               1
 Stepping:                                10
-CPU(s) scaling MHz:                      74%
+CPU(s) scaling MHz:                      100%
 CPU max MHz:                             3500,0000
 CPU min MHz:                             800,0000
 BogoMIPS:                                6999,82
@@ -51,8 +51,8 @@ Vulnerability Vmscape:                   Mitigation; IBPB before exit to userspa
 
 ## memory
                total        used        free      shared  buff/cache   available
-Mem:            15Gi       3,9Gi       1,0Gi       770Mi        11Gi        11Gi
-Swap:          2,0Gi          0B       2,0Gi
+Mem:            15Gi       4,3Gi       2,7Gi       811Mi       9,7Gi        11Gi
+Swap:          2,0Gi       256Ki       2,0Gi
 
 ## frequency governor and power
      12 performance
@@ -69,15 +69,15 @@ LLVM version: 19.1.1
 cargo 1.82.0 (8f40fc59f 2024-08-21)
 g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 Python 3.12.3
-kache-hash: f7cfa5be4bcd28ffa061588c7c80445cbd5690d0
+kache-hash: f7cfa5be4bcd28ffa061588c7c80445cbd5690d0 + tools/kache/kache-hash-lock.patch
 SRA Toolkit: external/sratoolkit/bin/fastq-dump : 3.1.1
 SRR5833294 records in data/: 4000000
 
 ## unihash source
-commit: a5a912e718a9caaa6c55d660a318f8cc48dcc243
+commit: 8993d8a524e8cfa3b172ef266a095a207ad44a4f
 uncommitted changes:
- M tools/fetch_data.sh
- M tools/paper_runs.sh
+ M bench/results/compiu-pro-2026-11-02/machine.txt
+ M bench/results/compiu-pro-2026-11-02/paper_runs.log
 
 ## settings
 STEPS=tests,kache,scale,eager,ablation,defrag,churn REPS=3 MAX_READS=2000000 THREADS=default

@@ -85,6 +85,11 @@ DELETION:
                           delete every (1/F)-th work item (whole reads, or
                           64 kbp windows) with as many threads, against
                           KmerTable::delete_read on one thread (default 0: off)
+    --defrag-compare      with --delete-frac: also compare defragmenting the
+                          table after deletion in place (defrag,
+                          defrag_incremental) with a round trip through
+                          KmerTable (into_table, the KmerTable operation,
+                          from_table), on identical tables
     --neg N               random k-mers (default 10000000)
 ";
 
@@ -110,6 +115,7 @@ struct Args {
     query_kmers: usize,
     neg: usize,
     delete_frac: f64,
+    defrag_compare: bool,
     hashset: bool,
     dump: Option<std::path::PathBuf>,
 }
@@ -144,6 +150,7 @@ fn parse_args() -> Args {
         query_kmers: 10_000_000,
         neg: 10_000_000,
         delete_frac: 0.0,
+        defrag_compare: false,
         hashset: false,
         dump: None,
     };
@@ -196,6 +203,7 @@ fn parse_args() -> Args {
             "--query-kmers" => a.query_kmers = num(&mut it, "--query-kmers"),
             "--neg" => a.neg = num(&mut it, "--neg"),
             "--delete-frac" => a.delete_frac = num(&mut it, "--delete-frac"),
+            "--defrag-compare" => a.defrag_compare = true,
             "--hashset" => a.hashset = true,
             "--dump" => a.dump = Some(val(&mut it, "--dump").into()),
             _ if x.starts_with('-') => die(format!("unknown option {x}")),
@@ -213,6 +221,9 @@ fn parse_args() -> Args {
     }
     if a.sizes.iter().any(|&f| !(f > 0.0 && f <= 1.0)) {
         die("--sizes fractions must be in (0, 1]");
+    }
+    if a.defrag_compare && a.delete_frac <= 0.0 {
+        die("--defrag-compare needs --delete-frac");
     }
     a
 }
@@ -586,6 +597,7 @@ fn main() {
     let mut base_rate = None;
     let mut all_ok = true;
     let mut locked = Vec::new();
+    let mut read_locks = Vec::new();
     for &th in &a.threads {
         let mut times = Vec::new();
         let mut last = None;
@@ -633,6 +645,69 @@ fn main() {
             rate(q.neg.len(), dn),
             rate(q.seq_kmers, ds),
         ));
+        // The same queries on the same table with shard read locks and
+        // through a read snapshot (no lock per query), alternating the two
+        // so that drifts of the machine speed hit both alike: what the read
+        // locks cost.
+        {
+            let snap = b.table.read_snapshot();
+            let pos = |snapshot: bool| {
+                parallel_count_once(q.pos.len(), th, &|s, e| {
+                    let p = &q.pos[s..e];
+                    if snapshot {
+                        p.iter().filter(|&&x| snap.contains(x)).count() as u64
+                    } else {
+                        p.iter().filter(|&&x| b.table.contains(x)).count() as u64
+                    }
+                })
+            };
+            let neg = |snapshot: bool| {
+                parallel_count_once(q.neg.len(), th, &|s, e| {
+                    let p = &q.neg[s..e];
+                    if snapshot {
+                        p.iter().filter(|&&x| snap.contains(x)).count() as u64
+                    } else {
+                        p.iter().filter(|&&x| b.table.contains(x)).count() as u64
+                    }
+                })
+            };
+            let stream = |snapshot: bool| {
+                parallel_count_once(q.seqs.len(), th, &|s, e| {
+                    let mut sq = if snapshot {
+                        snap.query_stream()
+                    } else {
+                        b.table.query_stream()
+                    };
+                    let mut h = 0u64;
+                    for r in &q.seqs[s..e] {
+                        sq.push(r, |_, p| h += p as u64);
+                        sq.end();
+                    }
+                    h
+                })
+            };
+            // times[pattern][snapshot]
+            let mut times: [[Vec<f64>; 2]; 3] = Default::default();
+            for _ in 0..a.reps {
+                for snapshot in [false, true] {
+                    let i = snapshot as usize;
+                    let (h, d) = pos(snapshot);
+                    assert_eq!(h, hp, "positive queries differ (snapshot {snapshot})");
+                    times[0][i].push(secs(d));
+                    times[1][i].push(secs(neg(snapshot).1));
+                    let (h, d) = stream(snapshot);
+                    assert_eq!(h, hs, "streaming queries differ (snapshot {snapshot})");
+                    times[2][i].push(secs(d));
+                }
+            }
+            let n = [q.pos.len(), q.neg.len(), q.seq_kmers];
+            let r = |p: usize, i: usize| n[p] as f64 / median(times[p][i].clone()) / 1e6;
+            read_locks.push((
+                [r(0, 0), r(1, 0), r(2, 0)],
+                [r(0, 1), r(1, 1), r(2, 1)],
+                cpu_ratio(),
+            ));
+        }
         let t1 = Instant::now();
         let mt = b.table.into_table();
         let conv = t1.elapsed();
@@ -705,6 +780,18 @@ fn main() {
         q.seq_kmers - count_invalid(&q.seqs, k),
         "streaming missed"
     );
+
+    println!("\n-- read locks: the same ConcurrentKmerTable queried with shard read locks and through a read snapshot (shards locked once, no lock per query), alternating, median of {} each, M queries/s --", a.reps);
+    println!("threads | locked positive | random | streaming | snapshot positive | random | streaming | locked / snapshot positive | random | streaming | CPU check");
+    for (i, &th) in a.threads.iter().enumerate() {
+        let ([lp, ln, ls], [up, un, us], cpu) = read_locks[i];
+        println!(
+            "{th:7} | {lp:15.2} | {ln:6.2} | {ls:9.2} | {up:17.2} | {un:6.2} | {us:9.2} | {:24.0} % | {:4.0} % | {:7.0} % | {cpu:9.2}",
+            100.0 * lp / up,
+            100.0 * ln / un,
+            100.0 * ls / us
+        );
+    }
 
     if !a.sizes.is_empty() {
         let th = a
@@ -848,6 +935,132 @@ fn deletion_scaling(a: &Args, items: &[Vec<u8>], st: &KmerTable, distinct: f64) 
         println!("  {c}; {busy_del}; {}", cpu_note());
         if a.check {
             ok &= check_equal(&reference, &mt, &format!("{th} threads after deletion"));
+        }
+    }
+    if a.defrag_compare {
+        ok &= defrag_comparison(a, items, &reference, distinct, &dels);
+    }
+    ok
+}
+
+/// A concurrent table built from `items` and with `dels` deleted, both with
+/// one thread (so that every call gives the same table).
+fn fragmented(
+    a: &Args,
+    items: &[Vec<u8>],
+    distinct: f64,
+    dels: &[&Vec<u8>],
+) -> ConcurrentKmerTable {
+    let b = concurrent_build(
+        &a.cfg,
+        a.shards,
+        a.capacity.then_some(distinct as u64),
+        items,
+        1,
+    );
+    for r in dels {
+        b.table.delete_read(r);
+    }
+    b.table
+}
+
+/// Defragmentation after deletion: in place on the concurrent table against
+/// a round trip through `KmerTable`, for `defrag` and `defrag_incremental`.
+/// Every run starts from a freshly built identical table; the result is
+/// checked against `reference` (the same deletions on `KmerTable`).
+fn defrag_comparison(
+    a: &Args,
+    items: &[Vec<u8>],
+    reference: &KmerTable,
+    distinct: f64,
+    dels: &[&Vec<u8>],
+) -> bool {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let start = fragmented(a, items, distinct, dels);
+    let s0 = start.stats();
+    let shards = s0.shards;
+    let stored = s0.stored_kmers.max(1) as f64;
+    println!(
+        "\n-- defragmentation after deletion: in place vs round trip through KmerTable (median of {}; every run starts from the same table, built and edited with one thread; defrag and conversions use all {cores} hardware threads) --",
+        a.reps
+    );
+    println!(
+        "start: {} pieces, {} live bases, {} dead bases, {} stored k-mers, {:.3} B/k-mer (heap by capacity)",
+        s0.pieces,
+        s0.live_bases,
+        s0.edits.dead_bases,
+        s0.stored_kmers,
+        s0.heap_bytes as f64 / stored
+    );
+    drop(start);
+    println!("operation | method | total s | into_table s | KmerTable op s | from_table s | pieces | live bases | B/k-mer | round trip / in place");
+    let mut ok = true;
+    for op in ["defrag", "defrag_incremental"] {
+        let mut in_place_time = 0.0;
+        for round_trip in [false, true] {
+            let mut tot = Vec::new();
+            let mut parts = Vec::new();
+            let mut last = None;
+            for _ in 0..a.reps {
+                let mut t = fragmented(a, items, distinct, dels);
+                let t0 = Instant::now();
+                let (t, p) = if round_trip {
+                    let mut kt = t.into_table();
+                    let c1 = t0.elapsed();
+                    if op == "defrag" {
+                        kt.defrag();
+                    } else {
+                        kt.defrag_incremental();
+                    }
+                    let c2 = t0.elapsed();
+                    let t = ConcurrentKmerTable::from_table_with_shards(kt, shards);
+                    let c3 = t0.elapsed();
+                    (t, Some((secs(c1), secs(c2 - c1), secs(c3 - c2))))
+                } else {
+                    if op == "defrag" {
+                        t.defrag();
+                    } else {
+                        t.defrag_incremental();
+                    }
+                    (t, None)
+                };
+                tot.push(secs(t0.elapsed()));
+                parts.extend(p);
+                last = Some(t);
+            }
+            let total = median(tot);
+            let t = last.unwrap();
+            let s = t.stats();
+            let part = |i: usize| -> String {
+                if parts.is_empty() {
+                    "-".into()
+                } else {
+                    format!(
+                        "{:.3}",
+                        median(parts.iter().map(|p| [p.0, p.1, p.2][i]).collect())
+                    )
+                }
+            };
+            let ratio = if round_trip {
+                format!("{:.2}", total / in_place_time)
+            } else {
+                in_place_time = total;
+                "-".into()
+            };
+            let method = if round_trip { "round trip" } else { "in place" };
+            println!(
+                "{op} | {method} | {total:.3} | {} | {} | {} | {} | {} | {:.3} | {ratio}",
+                part(0),
+                part(1),
+                part(2),
+                s.pieces,
+                s.live_bases,
+                s.heap_bytes as f64 / s.stored_kmers.max(1) as f64
+            );
+            if a.check {
+                let mt = t.into_table();
+                ok &= check_equal(reference, &mt, &format!("{op} {method}"));
+            }
         }
     }
     ok

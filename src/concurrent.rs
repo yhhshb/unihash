@@ -1856,3 +1856,7 @@ mod defrag;
 #[path = "concurrent_stream.rs"]
 mod stream;
 pub use stream::ConcurrentStreamingQuery;
+
+#[path = "concurrent_snapshot.rs"]
+mod snapshot;
+pub use snapshot::ReadSnapshot;

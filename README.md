@@ -57,6 +57,9 @@ ct.delete_read(b"ACGTTGCA...");                   // any thread, concurrently wi
 let mut sq = ct.query_stream();                   // in-order queries, any thread
 sq.push(b"ACGTTGCA...", |x, present| { /* ... */ });
 drop(sq);
+let snap = ct.read_snapshot();                    // read-only phase: no lock per query
+let hit = snap.contains(kmer);                    // (writers wait until it is dropped)
+drop(snap);
 let mut ct = ct;
 ct.defrag_incremental();                          // exclusive (&mut), in place
 let t: KmerTable = ct.into_table();               // &KmerTable is Sync: query from any thread
@@ -133,6 +136,12 @@ none stored twice, exact index) and exits with status 1 otherwise.
 `--delete-frac F` also times concurrent deletion: after each build, every
 (1/F)-th work item is deleted with as many threads, against single-threaded
 `KmerTable::delete_read` (and checked against it with `--check`).
+The same concurrent table is also queried through a `read_snapshot` (every shard
+read-locked once, no lock per query), which gives the cost of the read locks.
+`--defrag-compare` (with `--delete-frac`) times `defrag` and `defrag_incremental`
+after deletion in place against a round trip through `KmerTable` (`into_table`,
+the `KmerTable` operation, `from_table`), each run on an identical table built
+and edited with one thread, and checks every result.
 
 **kache-hash comparison.** `tools/kache_compare.sh` clones
 [kache-hash](https://github.com/jamshed/kache-hash) (pinned commit) into
@@ -486,6 +495,7 @@ src/concurrent.rs     ConcurrentKmerTable and Writer: sharded index layers, writ
 src/concurrent_delete.rs  concurrent delete_read / delete
 src/concurrent_defrag.rs  defrag / defrag_incremental of the concurrent table, in place
 src/concurrent_stream.rs  ConcurrentStreamingQuery
+src/concurrent_snapshot.rs  ReadSnapshot: every shard read-locked once, lock-free lookups
 src/seg.rs            segmented array of atomics with stable addresses
 src/edit.rs           delete_read / delete (piece cuts), defrag, defrag_incremental,
                       fragmentation, verify_index
@@ -513,6 +523,8 @@ tests/m14_concurrent_defrag.rs  in-place defragmentation of the concurrent table
                           same pieces as through a conversion, then concurrent use
 tests/m15_concurrent_stream.rs  ConcurrentStreamingQuery: equal to contains, changes
                           between and during pushes, writing callbacks
+tests/m16_read_snapshot.rs  ReadSnapshot: same answers as locked queries (all layers,
+                          several threads, streaming), writers wait for it
 tools/              ci.sh, fetch_data.sh, bench_real.sh, kache_compare.sh, churn_real.sh,
                     eager_compare.sh, scale.sh, paper_runs.sh (all paper measurements)
 tools/kache/        kache_bench.cpp, kache_scale.cpp (kache-hash drivers: single-threaded,
@@ -553,6 +565,10 @@ tools/kache/        kache_bench.cpp, kache_scale.cpp (kache-hash drivers: single
   deleting a quarter of it), `defrag_incremental` only rewrites the base array
   and re-sizes shards (0.3 s). While deletions run, minimizers do not become hot
   (promotions are retried later).
+* `read_snapshot` read-locks every shard once (in lock order) for a read-only
+  phase; lookups and streaming queries through it take no locks and run the
+  same code on the same data, so comparing them with locked queries measures
+  what the read locks cost. Writers and deleters block until it is dropped.
 * A `ConcurrentStreamingQuery` keeps a shard's read lock while successive
   k-mers share a minimizer (within one `push`), so writers to that shard wait
   meanwhile; its callback runs after the chunk, with no lock held. It runs at

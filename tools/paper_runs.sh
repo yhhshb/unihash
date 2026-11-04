@@ -24,8 +24,12 @@
 #             kache-hash and HashSet (memory, throughput, per-query
 #             counters) and thread scaling of the concurrent structures
 #             (insertion and queries)
-#   scale     tools/scale.sh CAPACITY=1 DELETE=0.25: ConcurrentKmerTable
-#             scaling for insertion, queries and deletion, with checks
+#   scale     tools/scale.sh CAPACITY=1 DELETE=0.25 with --defrag-compare:
+#             ConcurrentKmerTable scaling for insertion, queries and
+#             deletion, with checks; the same table queried with shard read
+#             locks and through a read snapshot (no lock per query: the cost
+#             of the read locks); defrag / defrag_incremental after deletion
+#             in place vs a round trip through KmerTable
 #   eager     tools/eager_compare.sh: deferred vs eager run indexing
 #   ablation  hot-minimizer threshold sweep (chr21, E. coli), candidate scan
 #             ties vs range (synthetic reads), max_piece_len 4096 vs 1 Mb
@@ -39,8 +43,9 @@
 #   STEPS      subset of the steps above
 #   FORCE=1    re-run steps already completed in OUT (default: resume,
 #              skipping steps marked done)
-#   THREADS    thread counts for the scaling runs (default: powers of two up
-#              to the hardware threads, and the hardware thread count)
+#   THREADS    thread counts for the scaling runs (default: every count
+#              from 1 to the hardware threads, e.g. 1,2,...,12 on 6 cores
+#              with SMT: physical cores alone, then hyperthreads)
 #   REPS       repetitions for medians (default 3)
 #   MAX_READS  records of SRR5833294 inserted (default 2000000, as in the paper)
 #   CXX        C++ compiler (default g++, needs C++20 and <atomic> wait/notify)
@@ -60,7 +65,9 @@ STEPS=${STEPS:-$ALL_STEPS}
 REPS=${REPS:-3}
 MAX_READS=${MAX_READS:-2000000}
 export REPS MAX_READS
-[[ -n "${THREADS:-}" ]] && export THREADS
+# Every thread count from 1 to the hardware threads, unless given.
+THREADS=${THREADS:-$(seq -s, 1 "$(getconf _NPROCESSORS_ONLN)")}
+export THREADS
 [[ -n "${CXX:-}" ]] && export CXX
 
 host=$(uname -n | cut -d. -f1)
@@ -189,7 +196,7 @@ say "recording the machine"
     git status --porcelain 2>/dev/null | grep -v -E "^\?\? ${OUT#"$ROOT"/}" || echo "  none"
     echo
     echo "## settings"
-    echo "STEPS=$STEPS REPS=$REPS MAX_READS=$MAX_READS THREADS=${THREADS:-default}"
+    echo "STEPS=$STEPS REPS=$REPS MAX_READS=$MAX_READS THREADS=$THREADS"
 } > "$OUT/machine.txt" 2>&1
 { sed -n '2,5p' "$OUT/machine.txt"; grep -E '^(Model name|Mem:|commit: )' "$OUT/machine.txt"; } | tee -a "$LOG" || true
 gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
@@ -232,8 +239,9 @@ step_kache() {
 
 step_scale() {
     # Table: ConcurrentKmerTable scaling (insertion, deletion, speed-ups);
-    # KmerTable deletion rate; concurrent table memory and into_table.
-    CAPACITY=1 DELETE=0.25 bash tools/scale.sh
+    # KmerTable deletion rate; concurrent table memory and into_table;
+    # read locks vs read snapshot; in-place defrag vs round trip.
+    CAPACITY=1 DELETE=0.25 EXTRA="--defrag-compare ${EXTRA:-}" bash tools/scale.sh
 }
 
 step_eager() {
@@ -321,6 +329,8 @@ say "summary"
     echo "| memory, single-thread throughput, per-query counters | kache/<data>_{summary.md,unihash.txt,kache.txt} |"
     echo "| concurrent insertion, concurrent queries | kache/<data>_scale_{summary.md,unihash.txt,kache.txt} |"
     echo "| ConcurrentKmerTable scaling and deletion, KmerTable deletion | scale/<data>_capacity.txt |"
+    echo "| cost of the read locks (locked queries vs read snapshot, same table) | scale/<data>_capacity.txt, section \"read locks\" |"
+    echo "| concurrent defrag in place vs round trip through KmerTable | scale/<data>_capacity.txt, section \"defragmentation after deletion\" |"
     echo "| eager vs deferred run indexing | eager/summary.txt |"
     echo "| hot threshold, candidate scan, max_piece_len | ablation/summary.txt |"
     echo "| defrag after bulk loading | defrag/*.txt |"
@@ -329,7 +339,8 @@ say "summary"
     echo "Not re-run by this script: the lexicographic minimizer order (no longer an"
     echo "option of the code), the 64-byte block size sweep and the A/B of the"
     echo "insertion shortcuts (comparisons against earlier commits), and the"
-    echo "concurrent in-place defrag timings (sandbox)."
+    echo "lock-free read path that was tried and dropped (not in the code; the"
+    echo "read-lock section gives the most any lock-free read path could gain)."
     echo
     echo "## Step timings"
     echo

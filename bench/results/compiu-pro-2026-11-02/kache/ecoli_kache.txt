@@ -2,19 +2,19 @@
 
 -- insertion --
 records 1, k-mers 4641622, distinct 4554269
-kache       0.393 s  11.80 M/s
+kache       0.425 s  10.92 M/s
 
 -- memory --
 kache heap (glibc)            101724736 B  22.336 B/k-mer  (capacity 8388608 keys, overflow 17916)
-RSS: before table 3.5 MiB, after table 100.9 MiB (+97.4 MiB), peak 157.9 MiB
+RSS: before table 3.5 MiB, after table 100.9 MiB (+97.4 MiB), peak 158.0 MiB
 
 -- queries: inserted input (positives) --
 workload: 4502392 k-mers, expected hits 4502392
-kmers-in-order                1.436 s     3.13 M/s   hits 4502392
-kmers-random-order            1.939 s     2.32 M/s   hits 4502392
-seq-streaming                 0.180 s    25.04 M/s   hits 4502392
+kmers-in-order                1.472 s     3.06 M/s   hits 4502392
+kmers-random-order            2.101 s     2.14 M/s   hits 4502392
+seq-streaming                 0.187 s    24.08 M/s   hits 4502392
   MISMATCHES vs unihash oracle 0
 
 -- negative queries --
-kache       0.396 s  2.52 M/s
+kache       0.414 s  2.41 M/s
   FALSE POSITIVES              0

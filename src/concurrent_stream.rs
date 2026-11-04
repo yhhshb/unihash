@@ -17,7 +17,12 @@
 //! inside [`push`](ConcurrentStreamingQuery::push); the answers of a chunk
 //! are handed to the callback after it is released, so the callback may
 //! insert into or delete from the same table.
+//!
+//! Created from a [`ReadSnapshot`] ([`ReadSnapshot::query_stream`]), the
+//! query runs the same steps but reads the snapshot's shards without
+//! locking.
 
+use super::snapshot::ReadSnapshot;
 use super::*;
 use crate::stream_query::StreamStats;
 
@@ -26,6 +31,8 @@ use crate::stream_query::StreamStats;
 /// one per thread with [`ConcurrentKmerTable::query_stream`].
 pub struct ConcurrentStreamingQuery<'a> {
     t: &'a ConcurrentKmerTable,
+    /// Read snapshot whose shards are read without locking, if any.
+    snap: Option<&'a ReadSnapshot<'a>>,
     roll: RollingKmer,
     lroll: RollingKmer,
     wmin: WindowMin,
@@ -47,9 +54,24 @@ impl ConcurrentKmerTable {
     /// Answer the k-mers of sequences in order, reusing work between
     /// successive k-mers (see [`ConcurrentStreamingQuery`]).
     pub fn query_stream(&self) -> ConcurrentStreamingQuery<'_> {
-        let (k, l) = (self.cfg.k, self.cfg.l);
+        ConcurrentStreamingQuery::new(self, None)
+    }
+}
+
+impl<'a> ReadSnapshot<'a> {
+    /// Answer the k-mers of sequences in order, as
+    /// [`ConcurrentKmerTable::query_stream`], without locking.
+    pub fn query_stream(&self) -> ConcurrentStreamingQuery<'_> {
+        ConcurrentStreamingQuery::new(self.t, Some(self))
+    }
+}
+
+impl<'a> ConcurrentStreamingQuery<'a> {
+    fn new(t: &'a ConcurrentKmerTable, snap: Option<&'a ReadSnapshot<'a>>) -> Self {
+        let (k, l) = (t.cfg.k, t.cfg.l);
         ConcurrentStreamingQuery {
-            t: self,
+            t,
+            snap,
             roll: RollingKmer::new(k),
             lroll: RollingKmer::new(l),
             wmin: WindowMin::new(k - l + 1),
@@ -131,11 +153,16 @@ impl<'a> ConcurrentStreamingQuery<'a> {
         let mut hot = t.l2 > 0 && self.known_hot.contains(&m);
         let found = if !hot {
             let sh = shard_of(m, t.l1.len());
-            if !matches!(&self.held, Some((h, _)) if *h == sh) {
-                self.release();
-                self.held = Some((sh, rlock(&t.l1[sh])));
-            }
-            let (_, g) = self.held.as_ref().expect("lock held");
+            let g: &MinimizerIndex = match self.snap {
+                Some(s) => &s.l1[sh],
+                None => {
+                    if !matches!(&self.held, Some((h, _)) if *h == sh) {
+                        self.release();
+                        self.held = Some((sh, rlock(&t.l1[sh])));
+                    }
+                    &self.held.as_ref().expect("lock held").1
+                }
+            };
             if t.l2 > 0 && g.is_hot(m) {
                 hot = true;
                 None
@@ -161,7 +188,10 @@ impl<'a> ConcurrentStreamingQuery<'a> {
             self.known_hot.insert(m);
             self.release();
             self.stats.fallback_lookups += 1;
-            let h = t.locate_hot(x, &mut trace);
+            let h = match self.snap {
+                Some(s) => s.locate_hot(x, &mut trace),
+                None => t.locate_hot(x, &mut trace),
+            };
             self.stats.entries_scanned += trace.entries_scanned;
             self.stats.tag_matches += trace.tag_matches;
             h
