@@ -1,7 +1,0 @@
-tests         57 s  finished 2026-11-02T17:30:26+01:00
-kache       1648 s  finished 2026-11-02T18:43:49+01:00
-scale       1121 s  finished 2026-11-02T19:02:30+01:00
-eager        320 s  finished 2026-11-02T19:07:50+01:00
-ablation     251 s  finished 2026-11-02T19:12:01+01:00
-defrag       193 s  finished 2026-11-02T19:15:14+01:00
-churn        912 s  finished 2026-11-02T19:30:26+01:00

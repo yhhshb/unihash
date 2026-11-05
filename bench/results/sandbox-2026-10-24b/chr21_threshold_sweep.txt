@@ -1,7 +1,0 @@
-chr21 (data/chr21.fa.gz), unihash-bench --no-oracle --hot-threshold T, sandbox CPU, 2026-10-24
-T     insert M/s  heap B/k-mer  hot ℓ / ℓ2   L2 entries  L3 k-mers  in-order  random  streaming  negatives (M k-mers/s)
-0     4.49        1.924         0 / 0        0           0          2.80      1.51    18.20      3.49
-16    6.82        2.157         4623 / 2112  422747      153241     4.69      2.32    28.64      3.33
-64    6.60        2.007         692 / 98     227500      22811      4.82      2.30    33.05      3.43
-256   6.20        1.959         92 / 1       97195       709        4.57      2.30    29.88      3.70
-E. coli insert: T=0 11.42 M/s, T=64 12.38 M/s (1 hot minimizer; no measurable effect)
