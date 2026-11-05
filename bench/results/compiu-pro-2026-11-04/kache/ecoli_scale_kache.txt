@@ -1,0 +1,33 @@
+== kache-hash scaling (k = 31, l = 17), 12 cores ==
+input: 71 items, 4641622 k-mers, 4554269 distinct
+single-threaded kache-hash: 4641622 k-mers in 0.408 s, 11.39 M k-mers/s, 4554269 distinct k-mers, 22.335 B/k-mer (heap; capacity 8388608 keys, overflow 17916)
+queries on the single-threaded table, shared read-only (M queries/s):
+threads | kache positive | random | streaming | CPU check
+      1 |           2.36 |   2.57 |     24.59 |      1.00
+      2 |           4.75 |   5.15 |     48.34 |      1.00
+      3 |           7.17 |   7.71 |     71.69 |      1.00
+      4 |           9.55 |  10.27 |     94.91 |      1.00
+      5 |          11.98 |  12.83 |    113.69 |      1.00
+      6 |          14.35 |  15.31 |    142.20 |      1.00
+      7 |          12.86 |  13.76 |    138.38 |      1.00
+      8 |          14.60 |  15.64 |    134.73 |      1.00
+      9 |          16.09 |  17.40 |    150.00 |      1.00
+     10 |          17.48 |  18.19 |    152.04 |      1.00
+     11 |          19.21 |  19.96 |    166.47 |      1.00
+     12 |          20.91 |  21.70 |    194.60 |      1.00
+concurrent kache-hash (Streaming_Kmer_Hash_Table<k, true>, one token per thread, created for 4554269 k-mers):
+threads | insert s | M k-mers/s | speed-up vs 1 thread | B/k-mer (heap) | CPU check
+      1 |    0.333 |      13.94 |                 1.00 |         22.335 |      1.00
+      2 |    0.184 |      25.29 |                 1.81 |         22.335 |      1.00
+      3 |    0.126 |      36.77 |                 2.64 |         22.335 |      1.00
+      4 |    0.100 |      46.22 |                 3.32 |         22.335 |      1.00
+      5 |    0.089 |      52.37 |                 3.76 |         22.335 |      1.00
+      6 |    0.080 |      57.83 |                 4.15 |         22.335 |      1.00
+      7 |    0.079 |      58.50 |                 4.20 |         22.335 |      1.00
+      8 |    0.076 |      61.19 |                 4.39 |         22.335 |      1.00
+      9 |    0.073 |      63.56 |                 4.56 |         22.335 |      1.00
+     10 |    0.073 |      63.81 |                 4.58 |         22.335 |      1.00
+     11 |    0.076 |      61.13 |                 4.39 |         22.335 |      1.00
+     12 |    0.079 |      58.53 |                 4.20 |         22.335 |      1.00
+
+check: all kache-hash sizes and answers equal unihash's

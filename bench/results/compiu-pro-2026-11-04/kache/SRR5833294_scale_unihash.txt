@@ -1,0 +1,109 @@
+== unihash-scale ==
+config: Config { k: 31, l: 17, bucket_bits: 10, max_piece_len: 4096, scan: TieOffsets, l2: 0, hot_threshold: 64, spill_dir: None, run_indexing: Eager }, shards 1024, cores 12
+CPU check 1.00× of start
+input: 2000000 items, 152000000 bases (loaded in 1.5 s)
+single-threaded KmerTable: 91929178 k-mers in 16.269 s, 5.65 M k-mers/s, 80209364 distinct k-mers, 2.506 B/k-mer (peak 3.336)
+queries: 10214354 positive, 10000000 random, streaming over 222223 items (10222258 k-mers)
+
+-- baseline: std HashSet<u64> (default hasher) --
+single-threaded HashSet<u64>: 91929178 k-mers in 12.068 s, 7.62 M k-mers/s, 80209364 distinct k-mers, 15.060 B/k-mer (peak 22.590)
+queries on the single-threaded set, shared read-only (M queries/s):
+threads | HashSet positive | random | streaming | CPU check
+      1 |            10.91 |  18.09 |     10.77 |      1.00
+      2 |            21.72 |  35.97 |     21.40 |      1.00
+      3 |            31.74 |  52.55 |     31.32 |      1.00
+      4 |            40.89 |  63.48 |     40.28 |      1.00
+      5 |            49.45 |  82.61 |     48.77 |      1.00
+      6 |            57.92 |  96.57 |     57.35 |      1.00
+      7 |            44.02 |  71.61 |     43.84 |      1.00
+      8 |            49.24 |  78.22 |     48.63 |      1.00
+      9 |            52.61 |  83.30 |     50.87 |      1.00
+     10 |            51.50 |  90.73 |     50.85 |      1.00
+     11 |            55.61 |  97.93 |     55.38 |      1.00
+     12 |            59.93 | 105.54 |     59.64 |      1.00
+sharded HashSet<u64>: 1024 shards of Mutex<HashSet<u64>>, 64 k-mers buffered per shard and writer, each pre-sized for 82246 k-mers
+threads | insert s | M k-mers/s | speed-up vs 1 thread | B/k-mer (heap) | peak B/k-mer | CPU check
+      1 |    7.745 |      11.87 |                 1.00 |         15.061 |       15.068 |      1.00
+      2 |    4.172 |      22.04 |                 1.86 |         15.061 |       15.075 |      1.00
+      3 |    2.990 |      30.74 |                 2.59 |         15.061 |       15.082 |      1.00
+      4 |    2.424 |      37.92 |                 3.19 |         15.061 |       15.088 |      1.00
+      5 |    2.152 |      42.72 |                 3.60 |         15.061 |       15.095 |      1.00
+      6 |    2.025 |      45.40 |                 3.82 |         15.061 |       15.102 |      1.00
+      7 |    2.005 |      45.84 |                 3.86 |         15.061 |       15.109 |      1.00
+      8 |    1.988 |      46.25 |                 3.90 |         15.061 |       15.116 |      1.00
+      9 |    2.001 |      45.94 |                 3.87 |         15.061 |       15.123 |      1.00
+     10 |    2.022 |      45.47 |                 3.83 |         15.061 |       15.129 |      1.00
+     11 |    1.946 |      47.23 |                 3.98 |         15.061 |       15.136 |      1.00
+     12 |    1.938 |      47.44 |                 4.00 |         15.061 |       15.143 |      1.00
+workloads written to target/kache-dump/SRR5833294_scale
+
+-- thread scaling: insertion (ConcurrentKmerTable, with_capacity(80209364): 16384 shards) --
+threads | insert s | M k-mers/s | speed-up vs 1 thread | vs KmerTable | efficiency | B/k-mer (heap) | peak B/k-mer | into_table s | B/k-mer after | chunk splits
+      1 |   13.220 |       6.95 |                 1.00 |         1.23 |       100 % |          2.799 |        2.800 |        1.655 |         2.428 | 1212
+  12635493 lock acquisitions, 0 contended (0.000 %, 0 slept), 0.000 s waiting; 10041 shard growths, 0.136 s; promotions 0.642 s (thread-seconds); writer context switches 0 voluntary (slept), 81 involuntary (preempted); 798 minor page faults; CPU busy 100 % of 1 thread(s); CPU check 1.00× of start
+  check 1 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      2 |    6.633 |      13.86 |                 1.99 |         2.45 |       100 % |          2.799 |        2.800 |        1.701 |         2.427 | 1165
+  12637192 lock acquisitions, 705 contended (0.006 %, 4 slept), 0.004 s waiting; 10045 shard growths, 0.136 s; promotions 0.641 s (thread-seconds); writer context switches 10 voluntary (slept), 51 involuntary (preempted); 2388 minor page faults; CPU busy 100 % of 2 thread(s); CPU check 1.00× of start
+  check 2 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      3 |    4.433 |      20.74 |                 2.98 |         3.67 |        99 % |          2.799 |        2.800 |        1.711 |         2.427 | 1130
+  12638763 lock acquisitions, 1367 contended (0.011 %, 3 slept), 0.006 s waiting; 10049 shard growths, 0.136 s; promotions 0.638 s (thread-seconds); writer context switches 9 voluntary (slept), 33 involuntary (preempted); 1598 minor page faults; CPU busy 100 % of 3 thread(s); CPU check 1.00× of start
+  check 3 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      4 |    3.333 |      27.58 |                 3.97 |         4.88 |        99 % |          2.799 |        2.800 |        1.699 |         2.428 | 1207
+  12640424 lock acquisitions, 2045 contended (0.016 %, 12 slept), 0.011 s waiting; 10053 shard growths, 0.134 s; promotions 0.634 s (thread-seconds); writer context switches 33 voluntary (slept), 43 involuntary (preempted); 1085 minor page faults; CPU busy 100 % of 4 thread(s); CPU check 1.00× of start
+  check 4 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      5 |    2.682 |      34.28 |                 4.93 |         6.07 |        99 % |          2.799 |        2.801 |        1.706 |         2.428 | 1186
+  12641180 lock acquisitions, 2693 contended (0.021 %, 18 slept), 0.016 s waiting; 10079 shard growths, 0.138 s; promotions 0.636 s (thread-seconds); writer context switches 50 voluntary (slept), 40 involuntary (preempted); 2627 minor page faults; CPU busy 100 % of 5 thread(s); CPU check 1.00× of start
+  check 5 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      6 |    2.233 |      41.18 |                 5.92 |         7.29 |        99 % |          2.799 |        2.801 |        1.684 |         2.428 | 1225
+  12643138 lock acquisitions, 3425 contended (0.027 %, 26 slept), 0.021 s waiting; 10118 shard growths, 0.140 s; promotions 0.637 s (thread-seconds); writer context switches 57 voluntary (slept), 32 involuntary (preempted); 1798 minor page faults; CPU busy 99 % of 6 thread(s); CPU check 1.00× of start
+  check 6 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      7 |    2.141 |      42.94 |                 6.18 |         7.60 |        88 % |          2.799 |        2.801 |        1.696 |         2.428 | 1181
+  12644340 lock acquisitions, 4105 contended (0.032 %, 40 slept), 0.030 s waiting; 10100 shard growths, 0.144 s; promotions 0.686 s (thread-seconds); writer context switches 97 voluntary (slept), 31 involuntary (preempted); 5179 minor page faults; CPU busy 99 % of 7 thread(s); CPU check 1.00× of start
+  check 7 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      8 |    2.053 |      44.77 |                 6.44 |         7.92 |        80 % |          2.799 |        2.801 |        1.676 |         2.428 | 1158
+  12645424 lock acquisitions, 4869 contended (0.039 %, 69 slept), 0.042 s waiting; 10123 shard growths, 0.144 s; promotions 0.720 s (thread-seconds); writer context switches 135 voluntary (slept), 50 involuntary (preempted); 4026 minor page faults; CPU busy 99 % of 8 thread(s); CPU check 1.00× of start
+  check 8 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+      9 |    1.976 |      46.52 |                 6.69 |         8.23 |        74 % |          2.799 |        2.801 |        1.689 |         2.428 | 1180
+  12646764 lock acquisitions, 5580 contended (0.044 %, 86 slept), 0.049 s waiting; 10119 shard growths, 0.149 s; promotions 0.759 s (thread-seconds); writer context switches 116 voluntary (slept), 41 involuntary (preempted); 797 minor page faults; CPU busy 99 % of 9 thread(s); CPU check 1.00× of start
+  check 9 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+     10 |    1.911 |      48.11 |                 6.92 |         8.51 |        69 % |          2.799 |        2.802 |        1.676 |         2.428 | 1160
+  12648066 lock acquisitions, 6152 contended (0.049 %, 98 slept), 0.054 s waiting; 10131 shard growths, 0.148 s; promotions 0.791 s (thread-seconds); writer context switches 142 voluntary (slept), 59 involuntary (preempted); 0 minor page faults; CPU busy 99 % of 10 thread(s); CPU check 1.00× of start
+  check 10 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+     11 |    1.855 |      49.57 |                 7.13 |         8.77 |        65 % |          2.797 |        2.800 |        1.690 |         2.428 | 1214
+  12649404 lock acquisitions, 6969 contended (0.055 %, 128 slept), 0.067 s waiting; 10146 shard growths, 0.152 s; promotions 0.819 s (thread-seconds); writer context switches 176 voluntary (slept), 126 involuntary (preempted); 1024 minor page faults; CPU busy 99 % of 11 thread(s); CPU check 1.00× of start
+  check 11 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+     12 |    1.787 |      51.43 |                 7.40 |         9.10 |        62 % |          2.798 |        2.802 |        1.681 |         2.427 | 1159
+  12650532 lock acquisitions, 7467 contended (0.059 %, 138 slept), 0.091 s waiting; 10134 shard growths, 0.150 s; promotions 0.848 s (thread-seconds); writer context switches 200 voluntary (slept), 129 involuntary (preempted); 0 minor page faults; CPU busy 99 % of 12 thread(s); CPU check 1.00× of start
+  check 12 threads: 80209364 stored k-mers vs 80209364 single-threaded, 0 missing, index exact → OK
+
+-- thread scaling: queries (M queries/s; KmerTable is lock-free, ConcurrentKmerTable takes shard read locks) --
+threads | KmerTable positive | random | streaming | Concurrent positive | random | streaming | CPU check
+      1 |               2.02 |   3.60 |     23.16 |                1.69 |   3.25 |     16.91 |      1.00
+      2 |               4.07 |   7.28 |     44.96 |                3.43 |   6.45 |     32.54 |      1.00
+      3 |               6.14 |  10.85 |     67.13 |                5.15 |   9.73 |     48.65 |      1.00
+      4 |               8.06 |  14.51 |     88.63 |                6.84 |  12.86 |     64.90 |      1.00
+      5 |              10.01 |  18.03 |    110.71 |                8.40 |  16.02 |     80.52 |      1.00
+      6 |              11.83 |  21.35 |    133.49 |                9.98 |  19.07 |     95.67 |      1.00
+      7 |              11.25 |  18.25 |    104.35 |                9.80 |  16.75 |     77.75 |      1.00
+      8 |              12.75 |  20.57 |    120.66 |               11.15 |  18.90 |     86.57 |      1.00
+      9 |              14.23 |  22.73 |    134.85 |               12.31 |  20.95 |     95.08 |      1.00
+     10 |              15.26 |  23.30 |    149.37 |               13.44 |  21.78 |    105.71 |      1.00
+     11 |              16.53 |  25.40 |    163.34 |               14.56 |  23.76 |    116.27 |      1.00
+     12 |              17.94 |  27.58 |    177.14 |               15.96 |  26.01 |    125.94 |      1.00
+
+-- read locks: the same ConcurrentKmerTable queried with shard read locks and through a read snapshot (shards locked once, no lock per query), alternating, median of 3 each, M queries/s --
+threads | locked positive | random | streaming | snapshot positive | random | streaming | locked / snapshot positive | random | streaming | CPU check
+      1 |            1.69 |   3.29 |     17.22 |              1.64 |   3.17 |     16.95 |                      103 % |  104 % |     102 % |      1.00
+      2 |            3.42 |   6.52 |     33.08 |              3.34 |   6.51 |     32.85 |                      102 % |  100 % |     101 % |      1.00
+      3 |            5.19 |   9.82 |     49.19 |              5.05 |   9.82 |     48.63 |                      103 % |  100 % |     101 % |      1.00
+      4 |            6.92 |  13.12 |     65.62 |              6.74 |  13.09 |     65.41 |                      103 % |  100 % |     100 % |      1.00
+      5 |            8.36 |  16.22 |     81.14 |              8.28 |  16.24 |     80.73 |                      101 % |  100 % |     101 % |      1.00
+      6 |            9.95 |  19.24 |     97.02 |              9.82 |  19.39 |     96.40 |                      101 % |   99 % |     101 % |      1.00
+      7 |            9.74 |  16.79 |     79.39 |              9.71 |  17.07 |     79.89 |                      100 % |   98 % |      99 % |      1.00
+      8 |           11.19 |  19.02 |     87.85 |             11.06 |  19.36 |     88.21 |                      101 % |   98 % |     100 % |      1.00
+      9 |           12.29 |  21.17 |     97.05 |             12.22 |  21.49 |     96.70 |                      101 % |   99 % |     100 % |      1.00
+     10 |           13.40 |  21.84 |    108.29 |             13.33 |  22.39 |    108.17 |                      100 % |   98 % |     100 % |      1.00
+     11 |           14.50 |  23.81 |    118.33 |             14.56 |  24.47 |    118.87 |                      100 % |   97 % |     100 % |      1.00
+     12 |           15.92 |  26.07 |    129.00 |             15.86 |  26.79 |    127.97 |                      100 % |   97 % |     101 % |      1.00
+
+check: all multi-threaded tables equal the single-threaded one

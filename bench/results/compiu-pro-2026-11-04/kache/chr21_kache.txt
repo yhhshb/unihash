@@ -1,0 +1,20 @@
+== kache-hash (k = 31, l = 17, single-threaded hash set, initial capacity 1048576) ==
+
+-- insertion --
+records 1, k-mers 40087089, distinct 34625350
+kache       4.373 s  9.17 M/s
+
+-- memory --
+kache heap (glibc)            813715920 B  23.501 B/k-mer  (capacity 67108864 keys, overflow 1253290)
+RSS: before table 3.5 MiB, after table 807.0 MiB (+803.4 MiB), peak 1279.8 MiB
+
+-- queries: inserted input (positives) --
+workload: 17166787 k-mers, expected hits 17166787
+kmers-in-order                5.612 s     3.06 M/s   hits 17166787
+kmers-random-order            8.300 s     2.07 M/s   hits 17166787
+seq-streaming                 0.830 s    20.69 M/s   hits 17166787
+  MISMATCHES vs unihash oracle 0
+
+-- negative queries --
+kache       0.418 s  2.39 M/s
+  FALSE POSITIVES              0
